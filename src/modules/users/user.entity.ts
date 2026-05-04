@@ -1,0 +1,50 @@
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+} from 'typeorm';
+
+export enum UserRole {
+  CUSTOMER = 'customer',
+  PROFESSIONAL = 'professional',
+}
+
+@Entity('users')
+export class User {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  @Column({ unique: true })
+  phone!: string;
+
+  @Column({ unique: true, nullable: true })
+  email!: string;
+
+  @Column({
+    type: 'enum',
+    enum: UserRole,
+  })
+  role!: UserRole;
+
+  @CreateDateColumn()
+  created_at!: Date;
+
+  @Column({ nullable: true })
+  fullName!: string;
+
+  @Column({ nullable: true })
+  age!: number;
+
+  @Column({ nullable: true })
+  gender!: string;
+
+  @Column({ default: false })
+  hasAcceptedTerms!: boolean;
+
+  @Column({ nullable: true })
+  termsAcceptedAt!: Date;
+
+  @Column({ nullable: true })
+  termsVersion!: string;
+}
