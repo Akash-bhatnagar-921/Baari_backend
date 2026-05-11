@@ -1,20 +1,33 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
-import { UsersModule } from 'modules/users/users.module';
-import { StrategiesModule } from './strategies/strategies.module';
+import { LoginOtp } from './entities/login-otp.entity';
+import { JWT_SECRET_FALLBACK } from './jwt.constants';
+import { EmailQueueService } from './services/email-queue.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { JwtModule } from '@nestjs/jwt';
 
 @Module({
-  controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
   imports: [
     UsersModule,
-    JwtModule.register({
-      secret: 'SECRET_KEY',
-      signOptions: { expiresIn: '7d' },
+    TypeOrmModule.forFeature([LoginOtp]),
+    PassportModule,
+    JwtModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        secret: configService.get<string>('JWT_SECRET') ?? JWT_SECRET_FALLBACK,
+        signOptions: {
+          expiresIn: '15m',
+        },
+      }),
     }),
   ],
+  controllers: [AuthController],
+  providers: [AuthService, EmailQueueService, JwtStrategy],
+  exports: [JwtModule],
 })
 export class AuthModule {}
