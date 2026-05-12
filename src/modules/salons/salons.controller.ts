@@ -8,14 +8,14 @@ import { CreateSalonDto } from './dto/create-salon.dto';
 export class SalonsController {
   constructor(private readonly salonsService: SalonsService) {}
 
-  @UseGuards(JwtAuthGuard)
+  // @UseGuards(JwtAuthGuard)
   @Post()
-  createSalon(@Body() body: CreateSalonDto, @Req() req: any) {
+  createSalon(@Body() body: CreateSalonDto, ) {
     console.log(body)
     // TEMP user
     // const user = { id: 'a4887564-7dda-49bf-b39b-2d11030ffb72' };
 
-    return this.salonsService.createSalon(body, req.user);
+    return this.salonsService.createSalon(body);
   }
 
   @Get('seed-services')

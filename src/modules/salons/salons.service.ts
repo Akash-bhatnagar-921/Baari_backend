@@ -9,7 +9,7 @@ import { SalonAmenity } from './entities/salon-amenity.entity';
 export class SalonsService {
   constructor(private dataSource: DataSource) {}
 
-  async createSalon(data: any, user: any) {
+  async createSalon(data: any) {
     const queryRunner = this.dataSource.createQueryRunner();
 
     await queryRunner.connect();
@@ -19,7 +19,7 @@ export class SalonsService {
       const salon = queryRunner.manager.create(Salon, {
         name: data.name,
         address: data.address,
-        owner: { id: user.userId },
+        // owner: { id: user.userId },
       });
 
       const savedSalon = await queryRunner.manager.save(salon);
