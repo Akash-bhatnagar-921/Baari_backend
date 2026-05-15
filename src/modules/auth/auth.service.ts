@@ -18,7 +18,7 @@ import { VerifyRegisterOtpDto } from './dto/login-otp.dto';
 
 const LOGIN_OTP_TTL_MS = 5 * 60 * 1000;
 const LOGIN_OTP_WINDOW_MS = 60 * 60 * 1000;
-const LOGIN_OTP_MAX_REQUESTS_PER_WINDOW = 4; // first send + 3 resends
+const LOGIN_OTP_MAX_REQUESTS_PER_WINDOW = 40; // first send + 3 resends
 
 @Injectable()
 export class AuthService {
@@ -33,7 +33,7 @@ export class AuthService {
 
   async register(data: any) {
     this.validatePhone(data.phone);
-    this.validateEmail(data.email);
+    if (data.email) this.validateEmail(data.email);
 
     const existingUser = await this.usersService.findByPhoneOrEmail(
       data.phone,
@@ -66,6 +66,11 @@ export class AuthService {
     };
   }
 
+  async checkPhone(phone: string) {
+    const user = await this.usersService.findByPhone(phone);
+    return { exists: !!user };
+  }
+
   async login(phone: string) {
     return this.requestLoginOtp(phone);
   }
@@ -79,9 +84,10 @@ export class AuthService {
       throw new BadRequestException('User not found');
     }
 
-    if (!user.email) {
-      throw new BadRequestException('No email is linked to this account');
-    }
+    // Email is optional for professionals. When absent the OTP is logged to
+    // the server console so an admin can relay it to the user.
+    const otpEmail = user.email ?? `${phone}@no-email.baari`;
+    const hasEmail = !!user.email;
 
     const now = new Date();
     const windowStartedAt = new Date(now.getTime() - LOGIN_OTP_WINDOW_MS);
@@ -100,7 +106,7 @@ export class AuthService {
       await this.loginOtpRepo.save(
         this.loginOtpRepo.create({
           phone,
-          email: user.email,
+          email: otpEmail,
           otpHash: this.hashOtp('blocked'),
           expiresAt: now,
           invalidatedAt: now,
@@ -142,17 +148,23 @@ export class AuthService {
     await this.loginOtpRepo.save(
       this.loginOtpRepo.create({
         phone,
-        email: user.email,
+        email: otpEmail,
         otpHash,
         expiresAt,
       }),
     );
 
-    await this.emailQueueService.enqueueLoginOtpEmail(user.email, otp);
+    if (hasEmail) {
+      await this.emailQueueService.enqueueLoginOtpEmail(user.email!, otp);
+    } else {
+      // No email on account — log OTP so admin can relay it to the user
+      console.log(`[NO-EMAIL OTP] phone=${phone} otp=${otp}`);
+    }
 
     return {
-      message: 'OTP sent to registered email',
-      email: this.maskEmail(user.email),
+      message: hasEmail ? 'OTP sent to registered email' : 'OTP generated — contact Baari admin for your code',
+      email: hasEmail ? this.maskEmail(user.email!) : null,
+      role: user.role,
       expiresInSeconds: LOGIN_OTP_TTL_MS / 1000,
       resendRemaining: LOGIN_OTP_MAX_REQUESTS_PER_WINDOW - recentOtpCount - 1,
     };
@@ -197,7 +209,7 @@ export class AuthService {
 
   async requestRegisterOtp(phone: string, email: string) {
     this.validatePhone(phone);
-    this.validateEmail(email);
+    if (email) this.validateEmail(email);
 
     const existingUser = await this.usersService.findByPhoneOrEmail(
       phone,
@@ -213,7 +225,7 @@ export class AuthService {
 
   async verifyRegisterOtp(data: VerifyRegisterOtpDto) {
     this.validatePhone(data.phone);
-    this.validateEmail(data.email);
+    if (data.email) this.validateEmail(data.email);
 
     if (
       !data.name ||

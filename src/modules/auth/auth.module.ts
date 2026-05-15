@@ -21,13 +21,13 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       useFactory: (configService: ConfigService) => ({
         secret: configService.get<string>('JWT_SECRET') ?? JWT_SECRET_FALLBACK,
         signOptions: {
-          expiresIn: '15m',
+          expiresIn: '30d',
         },
       }),
     }),
   ],
   controllers: [AuthController],
   providers: [AuthService, EmailQueueService, JwtStrategy],
-  exports: [JwtModule],
+  exports: [JwtModule, EmailQueueService],
 })
 export class AuthModule {}

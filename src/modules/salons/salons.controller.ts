@@ -1,6 +1,16 @@
-import { Param, Controller, Post, Body, Get, Patch } from '@nestjs/common';
+import {
+  Param,
+  Controller,
+  Post,
+  Body,
+  Get,
+  HttpCode,
+  Patch,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { SalonsService } from './salons.service';
-import { UseGuards, Req } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CreateSalonDto } from './dto/create-salon.dto';
 
@@ -8,14 +18,51 @@ import { CreateSalonDto } from './dto/create-salon.dto';
 export class SalonsController {
   constructor(private readonly salonsService: SalonsService) {}
 
-  // @UseGuards(JwtAuthGuard)
   @Post()
-  createSalon(@Body() body: CreateSalonDto, ) {
-    console.log(body)
-    // TEMP user
-    // const user = { id: 'a4887564-7dda-49bf-b39b-2d11030ffb72' };
-
+  createSalon(@Body() body: CreateSalonDto) {
     return this.salonsService.createSalon(body);
+  }
+
+  @Post('verify-code')
+  @HttpCode(200)
+  verifySalonCode(@Body() body: { phone: string; code: string }) {
+    return this.salonsService.verifySalonCode(body.phone, body.code);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('my')
+  getMySalons(@Req() req: any) {
+    return this.salonsService.getMySalons(req.user.userId);
+  }
+
+  @Get('franchises')
+  searchFranchises(@Query('q') q: string) {
+    return this.salonsService.searchFranchises(q ?? '');
+  }
+
+  @Get('nearby')
+  findNearby(
+    @Query('lat')       lat: string,
+    @Query('lng')       lng: string,
+    @Query('radius')    radius?: string,
+    @Query('amenities') amenities?: string,
+    @Query('services')  services?: string,
+    @Query('sort')      sort?: string,
+  ) {
+    const latNum   = parseFloat(lat);
+    const lngNum   = parseFloat(lng);
+    const radiusKm = radius ? parseFloat(radius) : 1;
+
+    if (isNaN(latNum) || isNaN(lngNum)) return [];
+
+    return this.salonsService.searchSalons({
+      lat:       latNum,
+      lng:       lngNum,
+      radiusKm,
+      amenities: amenities ? amenities.split(',').map((s) => s.trim()) : [],
+      services:  services  ? services.split(',').map((s) => s.trim())  : [],
+      sort:      (sort as any) ?? 'distance_asc',
+    });
   }
 
   @Get('seed-services')

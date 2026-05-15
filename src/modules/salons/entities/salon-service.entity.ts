@@ -13,9 +13,9 @@ export class SalonService {
   @ManyToOne(() => Service)
   service!: Service;
 
-  @Column()
+  @Column({ nullable: true })
   price!: number;
 
-  @Column()
+  @Column({ nullable: true })
   duration!: number;
 }

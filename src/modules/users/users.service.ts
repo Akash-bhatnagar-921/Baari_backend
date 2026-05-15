@@ -40,6 +40,11 @@ export class UsersService {
     return this.userRepo.findOne({ where });
   }
 
+  async deleteAccount(userId: string) {
+    await this.userRepo.delete(userId);
+    return { message: 'Account deleted successfully' };
+  }
+
   async updateProfile(userId: string, data: any) {
     await this.userRepo.update(userId, data);
     return { message: 'Profile updated' };

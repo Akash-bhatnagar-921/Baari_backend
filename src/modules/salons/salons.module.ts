@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AuthModule } from '../auth/auth.module';
 import { SalonsController } from './salons.controller';
 import { SalonsService } from './salons.service';
 
@@ -9,9 +10,12 @@ import { Amenity } from './entities/amenity.entity';
 import { SalonService } from './entities/salon-service.entity';
 import { Barber } from './entities/barber.entity';
 import { SalonAmenity } from './entities/salon-amenity.entity';
+import { SalonFranchise } from './entities/salon-franchise.entity';
+import { SalonFranchiseOwner } from './entities/salon-franchise-owner.entity';
 
 @Module({
   imports: [
+    AuthModule, // provides JwtService (via JwtModule) and EmailQueueService
     TypeOrmModule.forFeature([
       Salon,
       Service,
@@ -19,6 +23,8 @@ import { SalonAmenity } from './entities/salon-amenity.entity';
       SalonService,
       Barber,
       SalonAmenity,
+      SalonFranchise,
+      SalonFranchiseOwner,
     ]),
   ],
   controllers: [SalonsController],
