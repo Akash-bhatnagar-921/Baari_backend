@@ -9,6 +9,7 @@ import { AuthService } from './auth.service';
 import { LoginOtp } from './entities/login-otp.entity';
 import { JWT_SECRET_FALLBACK } from './jwt.constants';
 import { EmailQueueService } from './services/email-queue.service';
+import { SmsService } from './services/sms.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 
 @Module({
@@ -27,7 +28,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, EmailQueueService, JwtStrategy],
-  exports: [JwtModule, EmailQueueService],
+  providers: [AuthService, EmailQueueService, SmsService, JwtStrategy],
+  exports: [JwtModule, EmailQueueService, SmsService],
 })
 export class AuthModule {}

@@ -1,10 +1,25 @@
-import { Controller, UseGuards, Patch, Delete, Req, Body, Get, HttpCode } from '@nestjs/common';
-import { JwtAuthGuard } from 'common/guards/jwt-auth.guard';
+import {
+  Controller,
+  UseGuards,
+  Patch,
+  Delete,
+  Post,
+  Req,
+  Body,
+  Get,
+  HttpCode,
+  Param,
+  BadRequestException,
+} from '@nestjs/common';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
 
 @Controller('users')
 export class UsersController {
   constructor(private usersService: UsersService) {}
+
+  // ── Profile ───────────────────────────────────────────────────────────────
+
   @UseGuards(JwtAuthGuard)
   @Patch('profile')
   updateProfile(@Body() body: any, @Req() req: any) {
@@ -14,7 +29,6 @@ export class UsersController {
   @UseGuards(JwtAuthGuard)
   @Get('profile')
   async getProfile(@Req() req: any) {
-    console.log('REQ USER =>', req.user);
     return this.usersService.getProfile(req.user.userId);
   }
 
@@ -23,5 +37,86 @@ export class UsersController {
   @HttpCode(200)
   deleteAccount(@Req() req: any) {
     return this.usersService.deleteAccount(req.user.userId);
+  }
+
+  // ── Subscription ──────────────────────────────────────────────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Patch('fcm-token')
+  @HttpCode(200)
+  saveFcmToken(@Req() req: any, @Body() body: { token: string }) {
+    return this.usersService.saveFcmToken(req.user.userId, body.token ?? '');
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('subscription')
+  getSubscription(@Req() req: any) {
+    return this.usersService.getSubscription(req.user.userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('subscription/order')
+  @HttpCode(200)
+  createSubscriptionOrder(@Body() body: { plan: string }, @Req() req: any) {
+    if (!body?.plan) throw new BadRequestException('plan is required');
+    return this.usersService.createSubscriptionOrder(req.user.userId, body.plan);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('subscription')
+  @HttpCode(200)
+  createSubscription(
+    @Body()
+    body: {
+      plan: string;
+      paymentId?: string;
+      orderId?: string;
+      signature?: string;
+    },
+    @Req() req: any,
+  ) {
+    if (!body?.plan) throw new BadRequestException('plan is required');
+    const payment =
+      body.paymentId && body.orderId && body.signature
+        ? { paymentId: body.paymentId, orderId: body.orderId, signature: body.signature }
+        : undefined;
+    return this.usersService.createSubscription(req.user.userId, body.plan, payment);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('subscription')
+  @HttpCode(200)
+  cancelSubscription(@Req() req: any) {
+    return this.usersService.cancelSubscription(req.user.userId);
+  }
+
+  // ── Wishlist ───────────────────────────────────────────────────────────────
+
+  /** Returns all wishlisted salons with full details. */
+  @UseGuards(JwtAuthGuard)
+  @Get('wishlist')
+  getWishlist(@Req() req: any) {
+    return this.usersService.getWishlist(req.user.userId);
+  }
+
+  /** Returns only the salonIds — cheap call to sync heart icons. */
+  @UseGuards(JwtAuthGuard)
+  @Get('wishlist/ids')
+  getWishlistIds(@Req() req: any) {
+    return this.usersService.getWishlistIds(req.user.userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('wishlist/:salonId')
+  @HttpCode(200)
+  addToWishlist(@Param('salonId') salonId: string, @Req() req: any) {
+    return this.usersService.addToWishlist(req.user.userId, salonId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete('wishlist/:salonId')
+  @HttpCode(200)
+  removeFromWishlist(@Param('salonId') salonId: string, @Req() req: any) {
+    return this.usersService.removeFromWishlist(req.user.userId, salonId);
   }
 }

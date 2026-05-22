@@ -14,6 +14,7 @@ import { UsersService } from '../users/users.service';
 import { LoginOtp } from './entities/login-otp.entity';
 import { JWT_SECRET_FALLBACK } from './jwt.constants';
 import { EmailQueueService } from './services/email-queue.service';
+import { SmsService } from './services/sms.service';
 import { VerifyRegisterOtpDto } from './dto/login-otp.dto';
 
 const LOGIN_OTP_TTL_MS = 5 * 60 * 1000;
@@ -27,6 +28,7 @@ export class AuthService {
     private jwtService: JwtService,
     private configService: ConfigService,
     private emailQueueService: EmailQueueService,
+    private smsService: SmsService,
     @InjectRepository(LoginOtp)
     private loginOtpRepo: Repository<LoginOtp>,
   ) {}
@@ -58,6 +60,7 @@ export class AuthService {
     const payload = {
       sub: user.id,
       phone: user.phone,
+      role: user.role,
     };
 
     return {
@@ -154,16 +157,30 @@ export class AuthService {
       }),
     );
 
-    if (hasEmail) {
-      await this.emailQueueService.enqueueLoginOtpEmail(user.email!, otp);
-    } else {
-      // No email on account — log OTP so admin can relay it to the user
-      console.log(`[NO-EMAIL OTP] phone=${phone} otp=${otp}`);
+    // Fire SMS (best-effort) and email in parallel.
+    // SMS is sent to every user regardless of whether they have an email.
+    const [smsSent] = await Promise.all([
+      this.smsService.sendOtp(phone, otp),
+      hasEmail
+        ? this.emailQueueService.enqueueLoginOtpEmail(user.email, otp)
+        : Promise.resolve(),
+    ]);
+
+    if (!hasEmail && !smsSent && process.env.NODE_ENV !== 'production') {
+      // Neither channel available — log so a dev can relay manually.
+      console.log(`[NO-CHANNEL OTP] phone=${phone} otp=${otp}`);
     }
 
+    const channels: string[] = [];
+    if (smsSent)   channels.push('SMS');
+    if (hasEmail)  channels.push('email');
+
     return {
-      message: hasEmail ? 'OTP sent to registered email' : 'OTP generated — contact Baari admin for your code',
-      email: hasEmail ? this.maskEmail(user.email!) : null,
+      message: channels.length
+        ? `OTP sent via ${channels.join(' and ')}`
+        : 'OTP generated — contact Baari admin for your code',
+      email: hasEmail ? this.maskEmail(user.email) : null,
+      smsSent,
       role: user.role,
       expiresInSeconds: LOGIN_OTP_TTL_MS / 1000,
       resendRemaining: LOGIN_OTP_MAX_REQUESTS_PER_WINDOW - recentOtpCount - 1,
@@ -199,6 +216,7 @@ export class AuthService {
     const payload = {
       sub: user.id,
       phone: user.phone,
+      role: user.role,
     };
 
     return {
@@ -346,11 +364,18 @@ export class AuthService {
       }),
     );
 
-    await this.emailQueueService.enqueueLoginOtpEmail(email, otp);
+    const [smsSent] = await Promise.all([
+      this.smsService.sendOtp(phone, otp),
+      this.emailQueueService.enqueueLoginOtpEmail(email, otp),
+    ]);
+
+    const channels = ['email'];
+    if (smsSent) channels.unshift('SMS');
 
     return {
-      message: 'OTP sent to registered email',
+      message: `OTP sent via ${channels.join(' and ')}`,
       email: this.maskEmail(email),
+      smsSent,
       expiresInSeconds: LOGIN_OTP_TTL_MS / 1000,
       resendRemaining: LOGIN_OTP_MAX_REQUESTS_PER_WINDOW - recentOtpCount - 1,
     };

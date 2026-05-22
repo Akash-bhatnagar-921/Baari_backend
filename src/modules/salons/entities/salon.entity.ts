@@ -52,7 +52,10 @@ export class Salon {
   manager!: User;
 
   // The business owner record for this location (separate from auth user)
-  @ManyToOne(() => SalonFranchiseOwner, { nullable: true, onDelete: 'SET NULL' })
+  @ManyToOne(() => SalonFranchiseOwner, {
+    nullable: true,
+    onDelete: 'SET NULL',
+  })
   franchiseOwner!: SalonFranchiseOwner;
 
   // Every salon belongs to a franchise; non-franchise salons get an auto-generated one
@@ -98,6 +101,42 @@ export class Salon {
 
   @Column({ type: 'float', nullable: true })
   longitude!: number;
+
+  // Pending location update — submitted by the professional.
+  @Column({ type: 'float', nullable: true })
+  pendingLatitude!: number;
+
+  @Column({ type: 'float', nullable: true })
+  pendingLongitude!: number;
+
+  // Human-readable reverse-geocoded address for the pending pin
+  @Column({ nullable: true })
+  pendingAddress!: string;
+
+  // Pending city / state / pincode submitted for review alongside the address
+  @Column({ nullable: true })
+  pendingCity!: string;
+
+  @Column({ nullable: true })
+  pendingState!: string;
+
+  @Column({ nullable: true })
+  pendingPincode!: string;
+
+  // Set to true by the professional when they submit a new location.
+  @Column({ default: false })
+  hasPendingLocation!: boolean;
+
+  // Admin flips this to true directly in the DB (pgAdmin / TablePlus etc.)
+  // to approve the pending location. The app reads it on the next request
+  // and auto-promotes the pending coordinates to the live fields.
+  @Column({ default: false })
+  locationApproved!: boolean;
+
+  // Professional toggles this from the dashboard. Closed salons are hidden
+  // from all customer-facing searches.
+  @Column({ default: true })
+  isOpen!: boolean;
 
   // Aggregate rating — updated when reviews are submitted
   @Column({ type: 'float', default: 0 })

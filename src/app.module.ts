@@ -5,6 +5,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from './modules/users/users.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { SalonsModule } from './modules/salons/salons.module';
+import { BookingsModule } from './modules/bookings/bookings.module';
 
 @Module({
   imports: [
@@ -21,12 +22,13 @@ import { SalonsModule } from './modules/salons/salons.module';
       password: process.env.DB_PASS,
       database: process.env.DB_NAME,
       autoLoadEntities: true,
-      synchronize: true, // ⚠️ dev only
+      synchronize: process.env.TYPEORM_SYNCHRONIZE === 'true',
     }),
 
     UsersModule,
     AuthModule,
     SalonsModule,
+    BookingsModule,
   ],
 })
 export class AppModule {}

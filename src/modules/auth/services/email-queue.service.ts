@@ -61,7 +61,8 @@ export class EmailQueueService implements OnModuleDestroy {
 
   async sendApprovalEmail(to: string, data: ApprovalEmailData) {
     const from =
-      this.configService.get<string>('SMTP_FROM') ?? 'Baari <no-reply@baari.local>';
+      this.configService.get<string>('SMTP_FROM') ??
+      'Baari <no-reply@baari.local>';
 
     const html = `
 <!DOCTYPE html>
@@ -115,8 +116,10 @@ export class EmailQueueService implements OnModuleDestroy {
       html,
     });
 
-    if (!this.hasSmtpConfig) {
-      console.log(`DEV APPROVAL EMAIL for ${to}: secret code = ${data.secretCode}`);
+    if (!this.hasSmtpConfig && process.env.NODE_ENV !== 'production') {
+      console.log(
+        `DEV APPROVAL EMAIL for ${to}: secret code = ${data.secretCode}`,
+      );
     }
   }
 
@@ -170,7 +173,8 @@ export class EmailQueueService implements OnModuleDestroy {
 
   private async sendLoginOtpEmail(to: string, otp: string) {
     const from =
-      this.configService.get<string>('SMTP_FROM') ?? 'Baari <no-reply@baari.local>';
+      this.configService.get<string>('SMTP_FROM') ??
+      'Baari <no-reply@baari.local>';
 
     await this.transporter.sendMail({
       from,
@@ -180,7 +184,7 @@ export class EmailQueueService implements OnModuleDestroy {
       html: `<p>Your Baari login OTP is <strong>${otp}</strong>.</p><p>It expires in 5 minutes.</p>`,
     });
 
-    if (!this.hasSmtpConfig) {
+    if (!this.hasSmtpConfig && process.env.NODE_ENV !== 'production') {
       console.log(`DEV LOGIN OTP for ${to}: ${otp}`);
     }
   }

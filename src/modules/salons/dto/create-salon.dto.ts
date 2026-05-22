@@ -24,12 +24,12 @@ export class CreateSalonDto {
   barbers!: { name: string; experience: number }[];
 
   // Working hours (optional)
-  openingTime?: string;  // e.g. "09:00"
-  closingTime?: string;  // e.g. "21:00"
-  workingDays?: string;  // e.g. "Mon,Tue,Wed,Thu,Fri,Sat"
+  openingTime?: string; // e.g. "09:00"
+  closingTime?: string; // e.g. "21:00"
+  workingDays?: string; // e.g. "Mon,Tue,Wed,Thu,Fri,Sat"
 
   // Franchise (optional)
-  franchiseId?: string;   // UUID of existing SalonFranchise
+  franchiseId?: string; // UUID of existing SalonFranchise
   franchiseName?: string; // name to create a new SalonFranchise if no franchiseId
 
   // GPS coordinates from device (optional)

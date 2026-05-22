@@ -8,6 +8,7 @@ import {
 export enum UserRole {
   CUSTOMER = 'customer',
   PROFESSIONAL = 'professional',
+  ADMIN = 'admin',
 }
 
 @Entity('users')
@@ -47,4 +48,7 @@ export class User {
 
   @Column({ nullable: true })
   termsVersion!: string;
+
+  @Column({ nullable: true })
+  fcmToken!: string;
 }

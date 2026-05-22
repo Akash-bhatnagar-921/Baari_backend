@@ -14,4 +14,8 @@ export class Barber {
 
   @Column()
   experience!: number;
+
+  /** Comma-separated working days, e.g. "Mon,Tue,Wed,Thu,Fri,Sat". Null = follows salon schedule. */
+  @Column({ nullable: true })
+  workingDays!: string;
 }

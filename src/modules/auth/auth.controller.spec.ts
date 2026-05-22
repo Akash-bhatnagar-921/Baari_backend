@@ -1,23 +1,29 @@
-import { Test, TestingModule, } from '@nestjs/testing';
+import { Test, TestingModule } from '@nestjs/testing';
 import { AuthController } from './auth.controller';
-import { beforeEach, describe, it } from 'node:test';
+import { AuthService } from './auth.service';
 
 describe('AuthController', () => {
   let controller: AuthController;
+  const authService = {
+    checkPhone: jest.fn(),
+    register: jest.fn(),
+    login: jest.fn(),
+    requestLoginOtp: jest.fn(),
+    verifyLoginOtp: jest.fn(),
+    requestRegisterOtp: jest.fn(),
+    verifyRegisterOtp: jest.fn(),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
+      providers: [{ provide: AuthService, useValue: authService }],
     }).compile();
 
     controller = module.get<AuthController>(AuthController);
   });
 
   it('should be defined', () => {
-    // expect(controller).toBeDefined();
+    expect(controller).toBeDefined();
   });
 });
-function expect(controller: AuthController) {
-  throw new Error('Function not implemented.');
-}
-
