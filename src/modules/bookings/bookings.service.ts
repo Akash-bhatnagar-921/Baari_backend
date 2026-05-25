@@ -37,9 +37,43 @@ export class BookingsService {
        SET status = 'completed'
        WHERE status IN ('in_progress', 'confirmed')
          AND ${col} = $1
-         AND "scheduledAt" + ("totalDuration" * INTERVAL '1 minute') < NOW() - INTERVAL '30 minutes'`,
+         AND "scheduledAt" + ("totalDuration" * INTERVAL '1 minute') < NOW() - INTERVAL '3 minutes'`,
       [value],
     );
+  }
+
+  // Marks PENDING bookings as EXPIRED when the professional hasn't responded
+  // within 2 minutes of creation. Called lazily before fetching bookings.
+  private async autoExpirePendingBookings(filter: {
+    userId?: string;
+    salonId?: string;
+  }) {
+    const col = filter.userId ? '"userId"' : '"salonId"';
+    const value = filter.userId ?? filter.salonId ?? '';
+    const expired: Array<{ id: string; userId: string; salonName: string }> =
+      await this.dataSource.query(
+        `UPDATE bookings
+         SET status = 'expired', "bookingOtp" = NULL
+         WHERE status = 'pending'
+           AND ${col} = $1
+           AND "createdAt" < NOW() - INTERVAL '2 minutes'
+         RETURNING id, "userId", "salonName"`,
+        [value],
+      );
+    if (expired.length > 0) {
+      setImmediate(async () => {
+        for (const b of expired) {
+          await this.push
+            .sendToUser(
+              b.userId,
+              'Booking Request Expired',
+              `Your booking request at ${b.salonName} was not responded to in time and has expired. Please try again.`,
+              { bookingId: b.id, type: 'booking_expired' },
+            )
+            .catch(() => {});
+        }
+      });
+    }
   }
 
   // ── Available Slots (5-min intervals, single DB query) ───────────────────────
@@ -200,6 +234,38 @@ export class BookingsService {
       }
     }
 
+    // Free-tier salon limit: if the salon's professional is on the free plan,
+    // they can receive at most 50 bookings per calendar month.
+    const salonSubRows = await this.dataSource.query(
+      `SELECT sub.plan, sub.status, sub."expiresAt"
+       FROM subscriptions sub
+       JOIN salons s ON s."managerId" = sub."userId"::uuid
+       WHERE s.id = $1::uuid`,
+      [salonId],
+    );
+    const salonSub = salonSubRows[0];
+    const salonIsFreePlan =
+      !salonSub ||
+      salonSub.plan === 'free' ||
+      salonSub.status === 'cancelled' ||
+      !String(salonSub.plan).startsWith('professional_') ||
+      (salonSub.expiresAt && new Date() > new Date(salonSub.expiresAt));
+    if (salonIsFreePlan) {
+      const salonMonthStart = new Date();
+      salonMonthStart.setDate(1);
+      salonMonthStart.setHours(0, 0, 0, 0);
+      const salonCountRows = await this.dataSource.query(
+        `SELECT COUNT(*) AS cnt FROM bookings
+         WHERE "salonId" = $1 AND status NOT IN ('cancelled','rejected') AND "createdAt" >= $2`,
+        [salonId, salonMonthStart.toISOString()],
+      );
+      if (parseInt(salonCountRows[0]?.cnt ?? '0') >= 50) {
+        throw new BadRequestException(
+          'SALON_BOOKING_LIMIT: This salon has reached its monthly booking limit. Please try again next month or choose a different salon.',
+        );
+      }
+    }
+
     // Block if user already has an active upcoming booking
     const activeRows = await this.dataSource.query(
       `SELECT 1 FROM bookings
@@ -213,8 +279,10 @@ export class BookingsService {
       );
     }
 
-    const totalAmount   = services.reduce((s, i) => s + (i.price    ?? 0),  0);
-    const totalDuration = services.reduce((s, i) => s + (i.duration ?? 30), 0);
+    const serviceAmount  = services.reduce((s, i) => s + (i.price    ?? 0),  0);
+    const convenienceFee = Math.round(serviceAmount * 0.03 * 100) / 100;
+    const totalAmount    = serviceAmount + convenienceFee;
+    const totalDuration  = services.reduce((s, i) => s + (i.duration ?? 30), 0);
 
     // ── Slot check + booking insert inside a serialised transaction ──────────
     // pg_advisory_xact_lock acquires a session-level exclusive lock keyed on
@@ -263,6 +331,7 @@ export class BookingsService {
         salonName,
         scheduledAt: scheduledDate,
         totalAmount,
+        convenienceFee,
         totalDuration,
         services,
         status: BookingStatus.PENDING,
@@ -300,6 +369,32 @@ export class BookingsService {
         `Booking request sent!\n\n${body}`).catch(() => {});
     }
     if (phone) await this.sms.sendOtp(phone, body.slice(0, 140)).catch(() => {});
+  }
+
+  private async _notifyBookingRejected(booking: Booking) {
+    const { phone } = await this._getUserContacts(booking.userId);
+    const dt = new Intl.DateTimeFormat('en-IN', {
+      dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata',
+    }).format(new Date(booking.scheduledAt));
+    if (phone) {
+      await this.sms.sendMessage(
+        phone,
+        `Baari: Your booking at ${booking.salonName} on ${dt} was not accepted. Please search for another salon.`,
+      ).catch(() => {});
+    }
+  }
+
+  private async _notifyBookingCancelled(booking: Booking) {
+    const { phone } = await this._getUserContacts(booking.userId);
+    const dt = new Intl.DateTimeFormat('en-IN', {
+      dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Kolkata',
+    }).format(new Date(booking.scheduledAt));
+    if (phone) {
+      await this.sms.sendMessage(
+        phone,
+        `Baari: Your booking at ${booking.salonName} on ${dt} has been cancelled.`,
+      ).catch(() => {});
+    }
   }
 
   private async _notifyBookingAccepted(booking: Booking) {
@@ -364,13 +459,14 @@ export class BookingsService {
 
     booking.status = BookingStatus.REJECTED;
     const saved = await repo.save(booking);
-    setImmediate(() =>
+    setImmediate(() => {
       this.push.sendToUser(saved.userId,
         'Booking Not Accepted',
         `Your request at ${saved.salonName} was not accepted. You can search for another salon.`,
         { bookingId: saved.id, type: 'booking_rejected' },
-      ).catch(() => {}),
-    );
+      ).catch(() => {});
+      this._notifyBookingRejected(saved).catch(() => {});
+    });
     return saved;
   }
 
@@ -503,9 +599,14 @@ export class BookingsService {
 
   // ── User Bookings ─────────────────────────────────────────────────────────────
 
-  async getUserBookings(userId: string) {
+  async getUserBookings(userId: string, page = 1, limit = 20) {
+    await this.autoExpirePendingBookings({ userId });
     await this.autoCompleteOldBookings({ userId });
     const now = new Date();
+    const safePage  = Math.max(1, page);
+    const safeLimit = Math.min(Math.max(1, limit), 50); // cap at 50 per page
+    const offset = (safePage - 1) * safeLimit;
+
     const rows = await this.dataSource.query(
       `SELECT b.*, s.name AS "liveSalonName", s.address, s.city,
               EXISTS(
@@ -516,13 +617,13 @@ export class BookingsService {
        LEFT JOIN salons s ON s.id = b."salonId"::uuid
        WHERE b."userId" = $1
        ORDER BY b."scheduledAt" DESC
-       LIMIT 200`,
-      [userId],
+       LIMIT $2 OFFSET $3`,
+      [userId, safeLimit, offset],
     );
-    return rows.map((r: any) => {
+    const mapped = rows.map((r: any) => {
       const isUpcoming =
         new Date(r.scheduledAt) > now &&
-        !['cancelled', 'rejected', 'completed'].includes(r.status);
+        !['cancelled', 'rejected', 'completed', 'expired'].includes(r.status);
       return {
         id: r.id,
         salonId: r.salonId,
@@ -536,7 +637,6 @@ export class BookingsService {
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
         isUpcoming,
-        // Only show OTP for confirmed upcoming bookings
         bookingOtp:
           r.status === 'confirmed' && isUpcoming ? r.bookingOtp : null,
         canModify:
@@ -545,6 +645,17 @@ export class BookingsService {
         hasReview: r.hasReview === true || r.hasReview === 't',
       };
     });
+
+    const totalRows = await this.dataSource.query(
+      `SELECT COUNT(*) AS cnt FROM bookings WHERE "userId" = $1`,
+      [userId],
+    );
+    const total = parseInt(totalRows[0]?.cnt ?? '0', 10);
+
+    return {
+      bookings: mapped,
+      pagination: { page: safePage, limit: safeLimit, total, hasMore: offset + safeLimit < total },
+    };
   }
 
   // ── Professional: Earnings ───────────────────────────────────────────────────
@@ -624,6 +735,7 @@ export class BookingsService {
     );
     if (!salonRows.length) return [];
     const salonId = salonRows[0].id;
+    await this.autoExpirePendingBookings({ salonId });
     await this.autoCompleteOldBookings({ salonId });
 
     const today = new Date();
@@ -640,18 +752,25 @@ export class BookingsService {
       [salonId],
     );
 
-    // Today's stats
+    // Today's stats — only appointments scheduled for today
     const todayRows = bookings.filter((b: any) => {
       const dt = new Date(b.scheduledAt);
-      return (
-        dt >= today &&
-        dt < tomorrow &&
-        !['cancelled', 'rejected'].includes(b.status)
-      );
+      return dt >= today && dt < tomorrow && !['cancelled', 'rejected', 'expired'].includes(b.status);
     });
+
+    // Active = appointments the professional still needs to act on (not yet done)
+    const activeToday = todayRows.filter((b: any) =>
+      ['pending', 'confirmed', 'in_progress'].includes(b.status),
+    ).length;
+
+    const completedToday = todayRows.filter(
+      (b: any) => b.status === 'completed',
+    ).length;
+
     const todayRevenue = todayRows
       .filter((b: any) => b.status === 'completed')
       .reduce((s: number, b: any) => s + parseFloat(b.totalAmount ?? '0'), 0);
+
     const pendingCount = todayRows.filter(
       (b: any) => b.status === 'pending',
     ).length;
@@ -659,7 +778,8 @@ export class BookingsService {
     return {
       bookings,
       stats: {
-        todayBookings: todayRows.length,
+        todayBookings: activeToday,      // active appointments needing attention
+        completedToday,                   // done for the day
         todayRevenue: Math.round(todayRevenue * 100) / 100,
         pendingCount,
       },
@@ -691,12 +811,11 @@ export class BookingsService {
       );
     }
 
-    booking.services = services;
-    booking.totalAmount = services.reduce((s, i) => s + (i.price ?? 0), 0);
-    booking.totalDuration = services.reduce(
-      (s, i) => s + (i.duration ?? 30),
-      0,
-    );
+    const reSvcAmount = services.reduce((s, i) => s + (i.price ?? 0), 0);
+    booking.services       = services;
+    booking.convenienceFee = Math.round(reSvcAmount * 0.03 * 100) / 100;
+    booking.totalAmount    = reSvcAmount + booking.convenienceFee;
+    booking.totalDuration  = services.reduce((s, i) => s + (i.duration ?? 30), 0);
     return repo.save(booking);
   }
 
@@ -719,6 +838,8 @@ export class BookingsService {
     }
     booking.status = BookingStatus.CANCELLED;
     if (reason) booking.cancellationReason = reason;
-    return repo.save(booking);
+    const saved = await repo.save(booking);
+    setImmediate(() => this._notifyBookingCancelled(saved).catch(() => {}));
+    return saved;
   }
 }

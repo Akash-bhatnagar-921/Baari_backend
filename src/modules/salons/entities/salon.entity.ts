@@ -145,6 +145,14 @@ export class Salon {
   @Column({ type: 'int', default: 0 })
   reviewCount!: number;
 
+  // Set when professional activates Growth/Premium plan — sorts salon above standard listings
+  @Column({ default: false })
+  priorityListing!: boolean;
+
+  // Set when professional activates Premium plan — renders a "Featured" badge on salon cards
+  @Column({ default: false })
+  featured!: boolean;
+
   @CreateDateColumn()
   created_at!: Date;
 }

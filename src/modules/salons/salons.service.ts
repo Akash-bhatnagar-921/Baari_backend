@@ -494,7 +494,8 @@ export class SalonsService {
       SELECT
         s.id, s.name, s.address, s.city, s.state, s.pincode,
         s."contactNumber", s."openingTime", s."closingTime", s."workingDays",
-        s.latitude, s.longitude, s.rating, s."reviewCount",
+        s.latitude, s.longitude, s.rating, s."reviewCount", s.image,
+        s.featured, s."priorityListing",
         (6371 * acos(LEAST(1.0, GREATEST(-1.0,
           cos(radians($1)) * cos(radians(s.latitude))
             * cos(radians(s.longitude) - radians($2))
@@ -573,8 +574,10 @@ export class SalonsService {
       );
     }
 
-    // 6. Sort
+    // 6. Sort — featured salons always first, then priority-listed, then user's chosen order
     results.sort((a, b) => {
+      if (a.featured !== b.featured) return a.featured ? -1 : 1;
+      if (a.priorityListing !== b.priorityListing) return a.priorityListing ? -1 : 1;
       switch (sort) {
         case 'distance_asc':
           return Number(a.distance) - Number(b.distance);
@@ -611,6 +614,8 @@ export class SalonsService {
       rating: parseFloat(r.rating) || 0,
       reviewCount: parseInt(r.reviewCount) || 0,
       distance: Math.round(Number(r.distance) * 100) / 100,
+      featured: r.featured === true,
+      priorityListing: r.priorityListing === true,
       services: r.services as string[],
       amenities: r.amenities as string[],
     }));
@@ -906,6 +911,16 @@ export class SalonsService {
     };
   }
 
+  // ─── Professional: upload/replace salon cover photo ─────────────────────────
+
+  async updateSalonPhoto(userId: string, imagePath: string) {
+    const repo = this.dataSource.getRepository(Salon);
+    const salon = await repo.findOne({ where: { manager: { id: userId } } });
+    if (!salon) throw new UnauthorizedException('No salon found');
+    await repo.update(salon.id, { image: imagePath });
+    return { message: 'Photo updated', image: imagePath };
+  }
+
   // ─── Professional: request a location update (requires admin approval) ────────
 
   async updateMyLocation(
@@ -1051,7 +1066,7 @@ export class SalonsService {
       `SELECT s.id, s.name, s.address, s.city, s.state, s.pincode,
               s."openingTime", s."closingTime", s."workingDays",
               s."contactNumber", s.latitude, s.longitude,
-              s.rating, s."reviewCount",
+              s.rating, s."reviewCount", s.image,
               (SELECT COUNT(*) FROM barbers b WHERE b."salonId" = s.id)::int AS "barberCount"
        FROM salons s
        WHERE s.id = $1::uuid AND s.status = 'approved'`,
@@ -1094,6 +1109,7 @@ export class SalonsService {
       longitude: salon.longitude ? parseFloat(salon.longitude) : null,
       rating: parseFloat(salon.rating) || 0,
       reviewCount: parseInt(salon.reviewCount) || 0,
+      image: salon.image ?? null,
       barberCount: salon.barberCount,
       services: svcRows.map((r: any) => ({
         id: r.serviceId,
@@ -1162,6 +1178,19 @@ export class SalonsService {
       where: { manager: { id: userId } },
     });
     if (!salon) throw new UnauthorizedException('No salon found');
+
+    const maxBarbers = await this.getMaxBarbers(userId);
+    const barberCount = await this.dataSource.getRepository(Barber).count({
+      where: { salon: { id: salon.id } },
+    });
+    if (barberCount >= maxBarbers) {
+      const planLabel = await this.getPlanLabel(userId);
+      const limit = maxBarbers === Infinity ? 'unlimited' : String(maxBarbers);
+      throw new BadRequestException(
+        `BARBER_LIMIT: Your ${planLabel} plan allows up to ${limit} barber${maxBarbers === 1 ? '' : 's'}. Upgrade to add more.`,
+      );
+    }
+
     const barber = this.dataSource.getRepository(Barber).create({
       salon,
       name: name.trim(),
@@ -1169,6 +1198,38 @@ export class SalonsService {
       workingDays: workingDays ?? (null as any),
     });
     return this.dataSource.getRepository(Barber).save(barber);
+  }
+
+  private async getMaxBarbers(userId: string): Promise<number> {
+    const rows = await this.dataSource.query(
+      `SELECT plan, status, "expiresAt" FROM subscriptions WHERE "userId" = $1`,
+      [userId],
+    );
+    const sub = rows[0];
+    if (!sub || sub.status === 'cancelled') return 1;
+    if (sub.expiresAt && new Date() > new Date(sub.expiresAt)) return 1;
+    const limits: Record<string, number> = {
+      professional_starter: 3,
+      professional_growth: 10,
+      professional_premium: Infinity,
+    };
+    return limits[sub.plan] ?? 1;
+  }
+
+  private async getPlanLabel(userId: string): Promise<string> {
+    const rows = await this.dataSource.query(
+      `SELECT plan, status, "expiresAt" FROM subscriptions WHERE "userId" = $1`,
+      [userId],
+    );
+    const sub = rows[0];
+    if (!sub || sub.status === 'cancelled') return 'Free';
+    if (sub.expiresAt && new Date() > new Date(sub.expiresAt)) return 'Free';
+    const labels: Record<string, string> = {
+      professional_starter: 'Starter',
+      professional_growth: 'Growth',
+      professional_premium: 'Premium',
+    };
+    return labels[sub.plan] ?? 'Free';
   }
 
   async updateBarber(
@@ -1228,6 +1289,28 @@ export class SalonsService {
     };
   }
 
+  // ─── Rating recalculation helper ─────────────────────────────────────────────
+  // Recomputes rating + reviewCount from live review rows and writes back to the
+  // salon row.  Call after any review insert, update, or delete so the
+  // denormalised columns never drift.
+
+  private async _recalculateSalonRating(
+    salonId: string,
+  ): Promise<{ avgRating: number; reviewCount: number }> {
+    const agg = await this.dataSource.query(
+      `SELECT ROUND(AVG(rating)::numeric, 1) AS avg, COUNT(*) AS cnt
+       FROM reviews WHERE "salonId" = $1`,
+      [salonId],
+    );
+    const avgRating   = parseFloat(agg[0]?.avg ?? '0');
+    const reviewCount = parseInt(agg[0]?.cnt ?? '0', 10);
+    await this.dataSource.query(
+      `UPDATE salons SET rating = $1, "reviewCount" = $2 WHERE id = $3::uuid`,
+      [avgRating, reviewCount, salonId],
+    );
+    return { avgRating, reviewCount };
+  }
+
   // ─── submitReview ────────────────────────────────────────────────────────────
 
   async submitReview(
@@ -1275,19 +1358,7 @@ export class SalonsService {
       );
     }
 
-    // Recalculate salon aggregate rating
-    const agg = await this.dataSource.query(
-      `SELECT ROUND(AVG(rating)::numeric, 1) AS avg, COUNT(*) AS cnt
-       FROM reviews WHERE "salonId" = $1`,
-      [salonId],
-    );
-    const avgRating = parseFloat(agg[0]?.avg ?? '0');
-    const reviewCount = parseInt(agg[0]?.cnt ?? '0');
-    await this.dataSource.query(
-      `UPDATE salons SET rating = $1, "reviewCount" = $2 WHERE id = $3::uuid`,
-      [avgRating, reviewCount, salonId],
-    );
-
+    const { reviewCount } = await this._recalculateSalonRating(salonId);
     return { message: 'Review submitted successfully', rating, reviewCount };
   }
 

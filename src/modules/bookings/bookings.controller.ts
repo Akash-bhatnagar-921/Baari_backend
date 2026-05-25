@@ -10,6 +10,8 @@ import {
   Req,
   UseGuards,
   BadRequestException,
+  ParseIntPipe,
+  DefaultValuePipe,
 } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -50,8 +52,12 @@ export class BookingsController {
 
   @UseGuards(JwtAuthGuard)
   @Get('my')
-  getUserBookings(@Req() req: any) {
-    return this.bookingsService.getUserBookings(req.user.userId);
+  getUserBookings(
+    @Req() req: any,
+    @Query('page',  new DefaultValuePipe(1),  ParseIntPipe) page:  number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+  ) {
+    return this.bookingsService.getUserBookings(req.user.userId, page, limit);
   }
 
   @UseGuards(JwtAuthGuard)

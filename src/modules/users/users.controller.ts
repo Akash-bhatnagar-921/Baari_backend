@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 
 @Controller('users')
 export class UsersController {
@@ -22,7 +23,7 @@ export class UsersController {
 
   @UseGuards(JwtAuthGuard)
   @Patch('profile')
-  updateProfile(@Body() body: any, @Req() req: any) {
+  updateProfile(@Body() body: UpdateProfileDto, @Req() req: any) {
     return this.usersService.updateProfile(req.user.userId, body);
   }
 
@@ -52,6 +53,13 @@ export class UsersController {
   @Get('subscription')
   getSubscription(@Req() req: any) {
     return this.usersService.getSubscription(req.user.userId);
+  }
+
+  /** Professional: current plan details with feature limits. */
+  @UseGuards(JwtAuthGuard)
+  @Get('subscription/professional')
+  getProfessionalSubscription(@Req() req: any) {
+    return this.usersService.getProfessionalSubscription(req.user.userId);
   }
 
   @UseGuards(JwtAuthGuard)

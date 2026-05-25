@@ -4,8 +4,10 @@ import { AuthModule } from '../auth/auth.module';
 import { UsersModule } from '../users/users.module';
 import { SalonsController } from './salons.controller';
 import { SalonsService } from './salons.service';
+import { OffersService } from './offers.service';
 
 import { Salon } from './entities/salon.entity';
+import { Offer } from './entities/offer.entity';
 import { Service } from './entities/service.entity';
 import { Amenity } from './entities/amenity.entity';
 import { SalonService } from './entities/salon-service.entity';
@@ -21,6 +23,7 @@ import { Review } from './entities/review.entity';
     UsersModule, // provides PushNotificationService
     TypeOrmModule.forFeature([
       Salon,
+      Offer,
       Service,
       Amenity,
       SalonService,
@@ -32,6 +35,6 @@ import { Review } from './entities/review.entity';
     ]),
   ],
   controllers: [SalonsController],
-  providers: [SalonsService],
+  providers: [SalonsService, OffersService],
 })
 export class SalonsModule {}

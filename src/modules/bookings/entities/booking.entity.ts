@@ -13,6 +13,7 @@ export enum BookingStatus {
   IN_PROGRESS = 'in_progress', // OTP verified; service underway
   COMPLETED = 'completed',
   CANCELLED = 'cancelled',
+  EXPIRED = 'expired', // professional did not respond within 2 minutes
 }
 
 export interface BookingServiceItem {
@@ -49,6 +50,9 @@ export class Booking {
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   totalAmount!: number;
 
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  convenienceFee!: number;
+
   @Column({ type: 'int' })
   totalDuration!: number;
 
@@ -64,6 +68,16 @@ export class Booking {
 
   @Column({ nullable: true })
   cancellationReason!: string;
+
+  // Reminder flags — set by BookingReminderService to prevent duplicate sends
+  @Column({ default: false })
+  reminder24hSent!: boolean;
+
+  @Column({ default: false })
+  reminder1hSent!: boolean;
+
+  @Column({ default: false })
+  reminder10mSent!: boolean;
 
   @CreateDateColumn()
   createdAt!: Date;

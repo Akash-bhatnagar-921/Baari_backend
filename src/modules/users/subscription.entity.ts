@@ -7,9 +7,17 @@ import {
 } from 'typeorm';
 
 export enum SubscriptionPlan {
-  FREE = 'free',
-  BASIC = 'basic',
-  PRO = 'pro',
+  // ── Customer plans ──────────────────────────────────────────────────────────
+  FREE    = 'free',
+  BASIC   = 'basic',
+  PRO     = 'pro',
+  // ── Professional plans ───────────────────────────────────────────────────────
+  // Starter  ₹299/mo — up to 3 barbers, basic analytics
+  // Growth   ₹599/mo — up to 10 barbers, priority listing
+  // Premium  ₹999/mo — unlimited barbers, featured badge, advanced analytics
+  PROFESSIONAL_STARTER = 'professional_starter',
+  PROFESSIONAL_GROWTH  = 'professional_growth',
+  PROFESSIONAL_PREMIUM = 'professional_premium',
 }
 
 @Entity('subscriptions')

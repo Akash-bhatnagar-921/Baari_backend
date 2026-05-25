@@ -12,15 +12,25 @@ import {
   Req,
   UseGuards,
   BadRequestException,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { extname, join } from 'path';
+import { existsSync, mkdirSync } from 'fs';
 import { SalonsService } from './salons.service';
+import { OffersService } from './offers.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { AdminGuard } from '../../common/guards/admin.guard';
 import { CreateSalonDto } from './dto/create-salon.dto';
 
 @Controller('salons')
 export class SalonsController {
-  constructor(private readonly salonsService: SalonsService) {}
+  constructor(
+    private readonly salonsService: SalonsService,
+    private readonly offersService: OffersService,
+  ) {}
 
   @Post()
   createSalon(@Body() body: CreateSalonDto) {
@@ -149,6 +159,37 @@ export class SalonsController {
       req.user.userId,
       body.isOpen ?? true,
     );
+  }
+
+  /** Professional: upload a cover photo for their salon. */
+  @UseGuards(JwtAuthGuard)
+  @Post('my/photo')
+  @HttpCode(200)
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      storage: diskStorage({
+        destination: (_req, _file, cb) => {
+          const dir = join(process.cwd(), 'uploads', 'salons');
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          cb(null, dir);
+        },
+        filename: (_req, file, cb) => {
+          const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+          cb(null, `${unique}${extname(file.originalname)}`);
+        },
+      }),
+      limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB max
+      fileFilter: (_req, file, cb) => {
+        if (!file.mimetype.match(/^image\/(jpeg|jpg|png|webp)$/)) {
+          return cb(new BadRequestException('Only JPEG, PNG, or WebP images are allowed.'), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  uploadSalonPhoto(@Req() req: any, @UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No photo file received.');
+    return this.salonsService.updateSalonPhoto(req.user.userId, `/uploads/salons/${file.filename}`);
   }
 
   /** Professional: submit a new salon location for admin approval. */
@@ -281,5 +322,47 @@ export class SalonsController {
       body.rating,
       body.comment ?? '',
     );
+  }
+
+  // ── Offers ────────────────────────────────────────────────────────────────────
+
+  // Customer: active offers for a specific salon
+  @Get(':id/offers')
+  getSalonOffers(@Param('id') salonId: string) {
+    return this.offersService.getOffersBySalon(salonId);
+  }
+
+  // Customer: all active offers across all salons
+  @Get('offers/active')
+  getAllActiveOffers() {
+    return this.offersService.getAllActiveOffers();
+  }
+
+  // Professional: list own offers
+  @UseGuards(JwtAuthGuard)
+  @Get('my/offers')
+  getMyOffers(@Req() req: any) {
+    return this.offersService.getMyOffers(req.user.userId);
+  }
+
+  // Professional: create offer
+  @UseGuards(JwtAuthGuard)
+  @Post('my/offers')
+  createOffer(@Req() req: any, @Body() body: any) {
+    return this.offersService.createOffer(req.user.userId, body);
+  }
+
+  // Professional: update offer
+  @UseGuards(JwtAuthGuard)
+  @Patch('my/offers/:offerId')
+  updateOffer(@Req() req: any, @Param('offerId') offerId: string, @Body() body: any) {
+    return this.offersService.updateOffer(offerId, req.user.userId, body);
+  }
+
+  // Professional: delete offer
+  @UseGuards(JwtAuthGuard)
+  @Delete('my/offers/:offerId')
+  deleteOffer(@Req() req: any, @Param('offerId') offerId: string) {
+    return this.offersService.deleteOffer(offerId, req.user.userId);
   }
 }

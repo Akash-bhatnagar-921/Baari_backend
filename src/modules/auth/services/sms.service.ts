@@ -10,6 +10,34 @@ export class SmsService {
   }
 
   /**
+   * Sends a free-text transactional SMS via Fast2SMS quick route.
+   * Use for reminders, alerts, and status updates (not OTPs).
+   * Never throws — SMS is best-effort.
+   */
+  async sendMessage(phone: string, message: string): Promise<boolean> {
+    if (!this.apiKey) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[DEV SMS] phone=${phone} msg=${message}`);
+      }
+      return false;
+    }
+    try {
+      const res = await fetch('https://www.fast2sms.com/dev/bulkV2', {
+        method: 'POST',
+        headers: { authorization: this.apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ route: 'q', message, numbers: phone, flash: 0 }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) return false;
+      const data = (await res.json()) as { return?: boolean };
+      return data.return === true;
+    } catch (err) {
+      console.error('[SMS] Delivery failed:', (err as Error).message);
+      return false;
+    }
+  }
+
+  /**
    * Sends a 6-digit OTP via Fast2SMS (Indian SMS gateway).
    * Returns true when the API confirms delivery, false on any failure.
    * Never throws — SMS is best-effort; email is the authoritative channel.

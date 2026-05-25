@@ -51,4 +51,12 @@ export class User {
 
   @Column({ nullable: true })
   fcmToken!: string;
+
+  // Null for OTP-based users; set only for admin accounts (scrypt hash)
+  @Column({ nullable: true, select: false })
+  passwordHash?: string;
+
+  // Admins can ban a user; banned users cannot log in
+  @Column({ default: true })
+  isActive!: boolean;
 }

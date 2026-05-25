@@ -64,7 +64,7 @@ export class AuthService {
     };
 
     return {
-      access_token: this.jwtService.sign(payload),
+      access_token: this.jwtService.sign(payload, { expiresIn: '30d' }),
       user,
     };
   }
@@ -85,6 +85,10 @@ export class AuthService {
 
     if (!user) {
       throw new BadRequestException('User not found');
+    }
+
+    if (user.isActive === false) {
+      throw new BadRequestException('Your account has been deactivated. Please contact support.');
     }
 
     // Email is optional for professionals. When absent the OTP is logged to
@@ -220,7 +224,7 @@ export class AuthService {
     };
 
     return {
-      access_token: this.jwtService.sign(payload),
+      access_token: this.jwtService.sign(payload, { expiresIn: '30d' }),
       user,
     };
   }

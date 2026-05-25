@@ -50,8 +50,16 @@ export class UsersService {
     return { message: 'Account deleted successfully' };
   }
 
-  async updateProfile(userId: string, data: any) {
-    await this.userRepo.update(userId, data);
+  async updateProfile(
+    userId: string,
+    data: { fullName?: string; email?: string; age?: number; gender?: string },
+  ) {
+    const allowed: Partial<Pick<User, 'fullName' | 'email' | 'age' | 'gender'>> = {};
+    if (data.fullName !== undefined) allowed.fullName = data.fullName;
+    if (data.email    !== undefined) allowed.email    = data.email;
+    if (data.age      !== undefined) allowed.age      = data.age;
+    if (data.gender   !== undefined) allowed.gender   = data.gender;
+    if (Object.keys(allowed).length) await this.userRepo.update(userId, allowed);
     return { message: 'Profile updated' };
   }
 
@@ -112,6 +120,7 @@ export class UsersService {
         plan: SubscriptionPlan.FREE,
         expiresAt: null as any,
       });
+      await this.syncSalonFlags(userId, 'free');
       return {
         plan: SubscriptionPlan.FREE,
         status: 'active',
@@ -135,9 +144,18 @@ export class UsersService {
 
   // ─── Razorpay: plan prices in paise (₹1 = 100 paise) ─────────────────────
   private static readonly PLAN_PRICES: Record<string, number> = {
-    basic: 9900,   // ₹99
-    pro:   19900,  // ₹199
+    // Customer plans
+    basic: 9900,   // ₹99/mo
+    pro:   19900,  // ₹199/mo
+    // Professional plans
+    professional_starter: 29900,  // ₹299/mo
+    professional_growth:  59900,  // ₹599/mo
+    professional_premium: 99900,  // ₹999/mo
   };
+
+  private static readonly PROFESSIONAL_PLANS = new Set([
+    'professional_starter', 'professional_growth', 'professional_premium',
+  ]);
 
   async createSubscriptionOrder(userId: string, plan: string) {
     const amount = UsersService.PLAN_PRICES[plan];
@@ -192,9 +210,18 @@ export class UsersService {
     plan: string,
     payment?: { paymentId: string; orderId: string; signature: string },
   ) {
-    const validPlans = ['basic', 'pro'];
-    if (!validPlans.includes(plan)) {
+    const customerPlans = ['basic', 'pro'];
+    const allValidPlans = [...customerPlans, ...UsersService.PROFESSIONAL_PLANS];
+    if (!allValidPlans.includes(plan)) {
       throw new BadRequestException('Invalid plan');
+    }
+
+    // Professional plans can only be purchased by professional-role users.
+    if (UsersService.PROFESSIONAL_PLANS.has(plan)) {
+      const user = await this.userRepo.findOne({ where: { id: userId } });
+      if (!user || user.role !== 'professional') {
+        throw new BadRequestException('Professional plans are only available for salon professionals.');
+      }
     }
 
     // Verify Razorpay payment when credentials are configured.
@@ -220,6 +247,7 @@ export class UsersService {
         status: 'active',
         expiresAt,
       });
+      await this.syncSalonFlags(userId, plan);
       return { plan, status: 'active', expiresAt };
     }
 
@@ -230,7 +258,41 @@ export class UsersService {
       expiresAt,
     });
     await this.subRepo.save(sub);
+    await this.syncSalonFlags(userId, plan);
     return { plan, status: 'active', expiresAt };
+  }
+
+  // ─── Professional subscription info ──────────────────────────────────────────
+  // Returns the current professional plan with human-readable feature limits.
+  async getProfessionalSubscription(userId: string) {
+    const sub = await this.subRepo.findOne({ where: { userId } });
+    const isExpired =
+      sub &&
+      sub.plan !== SubscriptionPlan.FREE &&
+      sub.expiresAt &&
+      new Date() > new Date(sub.expiresAt);
+
+    if (!sub || isExpired || !UsersService.PROFESSIONAL_PLANS.has(sub.plan)) {
+      return {
+        plan: 'free',
+        status: 'active',
+        expiresAt: null,
+        features: { maxBarbers: 1, priorityListing: false, featuredBadge: false, analytics: 'basic' },
+      };
+    }
+
+    const featureMap: Record<string, object> = {
+      professional_starter: { maxBarbers: 3,         priorityListing: false, featuredBadge: false, analytics: 'basic'    },
+      professional_growth:  { maxBarbers: 10,        priorityListing: true,  featuredBadge: false, analytics: 'standard' },
+      professional_premium: { maxBarbers: Infinity,  priorityListing: true,  featuredBadge: true,  analytics: 'advanced' },
+    };
+
+    return {
+      plan: sub.plan,
+      status: sub.status,
+      expiresAt: sub.expiresAt,
+      features: featureMap[sub.plan] ?? featureMap['professional_starter'],
+    };
   }
 
   async saveFcmToken(userId: string, token: string) {
@@ -247,7 +309,18 @@ export class UsersService {
         expiresAt: null as any,
       },
     );
+    await this.syncSalonFlags(userId, 'free');
     return { message: 'Subscription cancelled' };
+  }
+
+  // Updates the salon's featured / priorityListing flags to match the professional's active plan.
+  private async syncSalonFlags(userId: string, plan: string) {
+    const featured = plan === 'professional_premium';
+    const priority = plan === 'professional_growth' || plan === 'professional_premium';
+    await this.dataSource.query(
+      `UPDATE salons SET featured = $1, "priorityListing" = $2 WHERE "managerId" = $3::uuid`,
+      [featured, priority, userId],
+    );
   }
 
   // ─── Wishlist ─────────────────────────────────────────────────────────────
@@ -257,6 +330,18 @@ export class UsersService {
       where: { userId, salonId },
     });
     if (existing) return { message: 'Already in wishlist', added: false };
+
+    // Free plan: max 10 wishlist entries
+    const sub = await this.getSubscription(userId);
+    if (sub.plan === SubscriptionPlan.FREE) {
+      const count = await this.wishlistRepo.count({ where: { userId } });
+      if (count >= 10) {
+        throw new BadRequestException(
+          'WISHLIST_LIMIT: Free plan allows up to 10 saved salons. Upgrade to Basic or Pro for unlimited wishlist.',
+        );
+      }
+    }
+
     await this.wishlistRepo.save(this.wishlistRepo.create({ userId, salonId }));
     return { message: 'Added to wishlist', added: true };
   }
