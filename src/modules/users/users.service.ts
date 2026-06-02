@@ -1,9 +1,9 @@
-import { BadRequestException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHmac } from 'crypto';
 import { DataSource, FindOptionsWhere, Repository } from 'typeorm';
-import { User } from './user.entity';
+import { User, UserRole } from './user.entity';
 import { Wishlist } from './wishlist.entity';
 import { Subscription, SubscriptionPlan } from './subscription.entity';
 
@@ -33,6 +33,47 @@ export class UsersService {
 
   async findByPhone(phone: string) {
     return this.userRepo.findOne({ where: { phone } });
+  }
+
+  async restoreExpiredBan(userId: string) {
+    await this.dataSource.query(
+      `UPDATE users SET "isActive" = true, "bannedUntil" = NULL, "banReason" = NULL WHERE id = $1::uuid`,
+      [userId],
+    );
+  }
+
+  /**
+   * Look up a customer by phone for offline-booking auto-fill.
+   * Throws descriptive errors when:
+   *  - phone belongs to the requesting professional's own salon
+   *  - phone belongs to any non-customer account (professional / admin)
+   * Returns { name, phone } on success, null when no account found.
+   */
+  async lookupCustomerByPhone(
+    phone: string,
+    requestingUserId: string,
+  ): Promise<{ name: string; phone: string } | null> {
+    // Block the salon's own contact number
+    const salonRows = await this.dataSource.query(
+      `SELECT "contactNumber" FROM salons WHERE "managerId" = $1::uuid LIMIT 1`,
+      [requestingUserId],
+    );
+    if (salonRows.length && salonRows[0].contactNumber === phone) {
+      throw new ForbiddenException(
+        "You can't book a slot under your own salon's phone number",
+      );
+    }
+
+    const user = await this.userRepo.findOne({ where: { phone } });
+    if (!user) return null;
+
+    if (user.role !== UserRole.CUSTOMER) {
+      throw new ForbiddenException(
+        'That phone number belongs to a professional account, not a customer',
+      );
+    }
+
+    return { name: user.fullName ?? '', phone: user.phone };
   }
 
   async findByEmail(email: string) {
@@ -397,5 +438,100 @@ export class UsersService {
       select: ['salonId'],
     });
     return { ids: entries.map((e) => e.salonId) };
+  }
+
+  // ── Complaints ─────────────────────────────────────────────────────────────
+
+  private static complaintsReady = false;
+  private static banColsReady = false;
+
+  private async ensureComplaintsReady() {
+    if (UsersService.complaintsReady) return;
+    await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS complaints (
+        id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        type         VARCHAR(10) NOT NULL CHECK (type IN ('user','salon')),
+        "targetId"   TEXT        NOT NULL,
+        "reporterId" TEXT        NOT NULL,
+        reason       TEXT        NOT NULL,
+        description  TEXT,
+        severity     VARCHAR(10) NOT NULL DEFAULT 'minor' CHECK (severity IN ('minor','major')),
+        status       VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','reviewed','resolved')),
+        "createdAt"  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "updatedAt"  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await this.dataSource.query(
+      `CREATE INDEX IF NOT EXISTS complaints_target_idx ON complaints ("targetId", severity, status)`,
+    );
+    UsersService.complaintsReady = true;
+  }
+
+  private async ensureBanColsReady() {
+    if (UsersService.banColsReady) return;
+    await this.dataSource.query(`ALTER TABLE users  ADD COLUMN IF NOT EXISTS "bannedUntil" TIMESTAMPTZ`);
+    await this.dataSource.query(`ALTER TABLE users  ADD COLUMN IF NOT EXISTS "banReason"   TEXT`);
+    await this.dataSource.query(`ALTER TABLE salons ADD COLUMN IF NOT EXISTS "isBanned"    BOOLEAN DEFAULT false`);
+    await this.dataSource.query(`ALTER TABLE salons ADD COLUMN IF NOT EXISTS "bannedUntil" TIMESTAMPTZ`);
+    await this.dataSource.query(`ALTER TABLE salons ADD COLUMN IF NOT EXISTS "banReason"   TEXT`);
+    UsersService.banColsReady = true;
+  }
+
+  async submitComplaint(
+    reporterId: string,
+    type: 'user' | 'salon',
+    targetId: string,
+    reason: string,
+    description: string,
+    severity: 'minor' | 'major',
+  ) {
+    if (!['user', 'salon'].includes(type)) throw new BadRequestException('Invalid type.');
+    if (!['minor', 'major'].includes(severity)) throw new BadRequestException('Invalid severity.');
+    if (!reason?.trim()) throw new BadRequestException('reason is required.');
+    if (!targetId?.trim()) throw new BadRequestException('targetId is required.');
+
+    await this.ensureComplaintsReady();
+
+    // Prevent duplicate active complaint from same reporter on same target
+    const existing = await this.dataSource.query(
+      `SELECT id FROM complaints
+       WHERE "reporterId" = $1 AND "targetId" = $2 AND status = 'pending'
+       LIMIT 1`,
+      [reporterId, targetId],
+    );
+    if (existing.length) throw new BadRequestException('You already have a pending complaint for this.');
+
+    await this.dataSource.query(
+      `INSERT INTO complaints (id, type, "targetId", "reporterId", reason, description, severity, status, "createdAt", "updatedAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW())`,
+      [type, targetId, reporterId, reason.trim(), description?.trim() ?? null, severity],
+    );
+
+    // Auto-ban when a target accumulates 3+ unresolved major complaints
+    if (severity === 'major') {
+      const [{ count }] = await this.dataSource.query(
+        `SELECT COUNT(*) AS count FROM complaints
+         WHERE "targetId" = $1 AND severity = 'major' AND status != 'resolved'`,
+        [targetId],
+      );
+      if (Number(count) >= 3) {
+        await this.ensureBanColsReady();
+        const bannedUntil = new Date(Date.now() + 7 * 24 * 3_600_000).toISOString();
+        const banReason = 'Auto-banned: 3 or more major complaints received.';
+        if (type === 'user') {
+          await this.dataSource.query(
+            `UPDATE users SET "isActive" = false, "bannedUntil" = $1, "banReason" = $2 WHERE id = $3::uuid AND "isActive" = true`,
+            [bannedUntil, banReason, targetId],
+          );
+        } else {
+          await this.dataSource.query(
+            `UPDATE salons SET "isBanned" = true, "bannedUntil" = $1, "banReason" = $2 WHERE id = $3::uuid AND COALESCE("isBanned", false) = false`,
+            [bannedUntil, banReason, targetId],
+          );
+        }
+      }
+    }
+
+    return { submitted: true };
   }
 }

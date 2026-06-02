@@ -93,6 +93,12 @@ export class SalonsController {
     return this.salonsService.searchFranchises(q ?? '');
   }
 
+  /** Public: trending salons + popular services, optionally filtered by city. */
+  @Get('trending')
+  getTrending(@Query('city') city?: string) {
+    return this.salonsService.getTrendingSalons(city);
+  }
+
   @Get('nearby')
   findNearby(
     @Query('lat') lat: string,
@@ -293,13 +299,403 @@ export class SalonsController {
     return this.salonsService.deleteBarber(req.user.userId, barberId);
   }
 
+  /** Professional: update barber profile info (specialization, bio, hours). */
+  @UseGuards(JwtAuthGuard)
+  @Patch('my/barbers/:barberId/profile')
+  updateBarberProfile(
+    @Req() req: any,
+    @Param('barberId') barberId: string,
+    @Body() body: { specialization?: string; bio?: string; openingTime?: string; closingTime?: string },
+  ) {
+    return this.salonsService.updateBarberProfile(req.user.userId, barberId, body);
+  }
+
+  /** Professional: set barber availability (available / on leave / on break). */
+  @UseGuards(JwtAuthGuard)
+  @Patch('my/barbers/:barberId/availability')
+  setBarberAvailability(
+    @Req() req: any,
+    @Param('barberId') barberId: string,
+    @Body() body: { isAvailable: boolean; leaveUntil?: string | null; breakUntil?: string | null },
+  ) {
+    return this.salonsService.setBarberAvailability(req.user.userId, barberId, body);
+  }
+
+  /** Professional: upload barber profile photo. */
+  @UseGuards(JwtAuthGuard)
+  @Post('my/barbers/:barberId/photo')
+  @HttpCode(200)
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      storage: diskStorage({
+        destination: (_req, _file, cb) => {
+          const dir = join(process.cwd(), 'uploads', 'barbers');
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          cb(null, dir);
+        },
+        filename: (_req, file, cb) => {
+          const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+          cb(null, `${unique}${extname(file.originalname)}`);
+        },
+      }),
+      limits: { fileSize: 5 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        if (!file.mimetype.match(/^image\/(jpeg|jpg|png|webp)$/)) {
+          return cb(new BadRequestException('Only JPEG, PNG, or WebP images are allowed.'), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  uploadBarberPhoto(
+    @Req() req: any,
+    @Param('barberId') barberId: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) throw new BadRequestException('No photo file received.');
+    return this.salonsService.uploadBarberPhoto(req.user.userId, barberId, `/uploads/barbers/${file.filename}`);
+  }
+
+  /** Professional: add a work photo to barber gallery. */
+  @UseGuards(JwtAuthGuard)
+  @Post('my/barbers/:barberId/gallery')
+  @HttpCode(200)
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      storage: diskStorage({
+        destination: (_req, _file, cb) => {
+          const dir = join(process.cwd(), 'uploads', 'barbers', 'gallery');
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          cb(null, dir);
+        },
+        filename: (_req, file, cb) => {
+          const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+          cb(null, `${unique}${extname(file.originalname)}`);
+        },
+      }),
+      limits: { fileSize: 5 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        if (!file.mimetype.match(/^image\/(jpeg|jpg|png|webp)$/)) {
+          return cb(new BadRequestException('Only JPEG, PNG, or WebP images are allowed.'), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  addToBarberGallery(
+    @Req() req: any,
+    @Param('barberId') barberId: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() body: { caption?: string },
+  ) {
+    if (!file) throw new BadRequestException('No photo file received.');
+    return this.salonsService.addToBarberGallery(
+      req.user.userId, barberId,
+      `/uploads/barbers/gallery/${file.filename}`,
+      body?.caption,
+    );
+  }
+
+  /** Professional: remove a photo from barber gallery by index. */
+  @UseGuards(JwtAuthGuard)
+  @Delete('my/barbers/:barberId/gallery/:index')
+  @HttpCode(200)
+  removeFromBarberGallery(
+    @Req() req: any,
+    @Param('barberId') barberId: string,
+    @Param('index') index: string,
+  ) {
+    return this.salonsService.removeFromBarberGallery(req.user.userId, barberId, parseInt(index, 10));
+  }
+
+  /** Professional: update barber payroll settings (salary/commission). */
+  @UseGuards(JwtAuthGuard)
+  @Patch('my/barbers/:barberId/payroll')
+  updateBarberPayroll(
+    @Req() req: any,
+    @Param('barberId') barberId: string,
+    @Body() body: { baseSalary?: number; commissionRate?: number; salaryType?: string },
+  ) {
+    return this.salonsService.updateBarberPayrollSettings(req.user.userId, barberId, body);
+  }
+
+  // ── Walk-in queue ─────────────────────────────────────────────────────────────
+
+  /** Professional: list today's (or a given date's) walk-ins. */
+  @UseGuards(JwtAuthGuard)
+  @Get('my/walk-ins')
+  getWalkIns(@Req() req: any, @Query('date') date?: string) {
+    return this.salonsService.getWalkIns(req.user.userId, date);
+  }
+
+  /** Professional: add a walk-in customer (optionally with a scheduled slot to block availability). */
+  @UseGuards(JwtAuthGuard)
+  @Post('my/walk-ins')
+  @HttpCode(200)
+  addWalkIn(
+    @Req() req: any,
+    @Body()
+    body: {
+      customerName: string;
+      customerPhone?: string;
+      barberId?: string;
+      services?: Array<{
+        serviceId?: string;
+        serviceName: string;
+        price: number;
+        duration: number;
+      }>;
+      notes?: string;
+      scheduledAt?: string;
+    },
+  ) {
+    if (!body?.customerName) throw new BadRequestException('customerName is required');
+    return this.salonsService.addWalkIn(req.user.userId, body);
+  }
+
+  /** Professional: update walk-in status / barber / notes. */
+  @UseGuards(JwtAuthGuard)
+  @Patch('my/walk-ins/:walkInId')
+  updateWalkIn(
+    @Req() req: any,
+    @Param('walkInId') walkInId: string,
+    @Body() body: { status?: string; barberId?: string; notes?: string },
+  ) {
+    return this.salonsService.updateWalkIn(req.user.userId, walkInId, body);
+  }
+
+  /** Professional: remove a walk-in record. */
+  @UseGuards(JwtAuthGuard)
+  @Delete('my/walk-ins/:walkInId')
+  @HttpCode(200)
+  deleteWalkIn(@Req() req: any, @Param('walkInId') walkInId: string) {
+    return this.salonsService.deleteWalkIn(req.user.userId, walkInId);
+  }
+
+  // ── Schedule optimisation ──────────────────────────────────────────────────
+
+  /** Professional: get schedule gaps and utilisation rate for a given date. */
+  @UseGuards(JwtAuthGuard)
+  @Get('my/schedule/gaps')
+  getScheduleGaps(@Req() req: any, @Query('date') date?: string) {
+    return this.salonsService.getScheduleGaps(req.user.userId, date);
+  }
+
+  // ── Inventory management ──────────────────────────────────────────────────
+
+  /** Professional: list all inventory items. */
+  @UseGuards(JwtAuthGuard)
+  @Get('my/inventory')
+  getInventory(@Req() req: any) {
+    return this.salonsService.getInventory(req.user.userId);
+  }
+
+  /** Professional: add an inventory item. */
+  @UseGuards(JwtAuthGuard)
+  @Post('my/inventory')
+  addInventoryItem(
+    @Req() req: any,
+    @Body()
+    body: {
+      name: string;
+      category?: string;
+      quantity?: number;
+      unit?: string;
+      minStock?: number;
+      costPerUnit?: number;
+      notes?: string;
+    },
+  ) {
+    if (!body?.name) throw new BadRequestException('name is required');
+    return this.salonsService.addInventoryItem(req.user.userId, body);
+  }
+
+  /** Professional: update an inventory item. */
+  @UseGuards(JwtAuthGuard)
+  @Patch('my/inventory/:itemId')
+  updateInventoryItem(
+    @Req() req: any,
+    @Param('itemId') itemId: string,
+    @Body()
+    body: Partial<{
+      name: string;
+      category: string;
+      quantity: number;
+      unit: string;
+      minStock: number;
+      costPerUnit: number;
+      notes: string;
+    }>,
+  ) {
+    return this.salonsService.updateInventoryItem(req.user.userId, itemId, body);
+  }
+
+  /** Professional: delete an inventory item. */
+  @UseGuards(JwtAuthGuard)
+  @Delete('my/inventory/:itemId')
+  @HttpCode(200)
+  deleteInventoryItem(@Req() req: any, @Param('itemId') itemId: string) {
+    return this.salonsService.deleteInventoryItem(req.user.userId, itemId);
+  }
+
+  // ── Attendance ────────────────────────────────────────────────────────────
+
+  /** Professional: get monthly attendance for all barbers. */
+  @UseGuards(JwtAuthGuard)
+  @Get('my/attendance')
+  getAttendance(
+    @Req() req: any,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    const now = new Date();
+    return this.salonsService.getAttendance(
+      req.user.userId,
+      month ? parseInt(month, 10) : now.getMonth() + 1,
+      year ? parseInt(year, 10) : now.getFullYear(),
+    );
+  }
+
+  /** Professional: record or update a barber's attendance for a date. */
+  @UseGuards(JwtAuthGuard)
+  @Post('my/attendance')
+  @HttpCode(200)
+  markAttendance(
+    @Req() req: any,
+    @Body()
+    body: {
+      barberId: string;
+      date: string;
+      clockIn?: string;
+      clockOut?: string;
+      status: string;
+      notes?: string;
+    },
+  ) {
+    if (!body?.barberId || !body?.date || !body?.status) {
+      throw new BadRequestException('barberId, date and status are required');
+    }
+    return this.salonsService.markAttendance(req.user.userId, body);
+  }
+
+  // ── Payroll ────────────────────────────────────────────────────────────────
+
+  /** Professional: monthly payroll summary for all barbers. */
+  @UseGuards(JwtAuthGuard)
+  @Get('my/payroll')
+  getPayrollSummary(
+    @Req() req: any,
+    @Query('month') month: string,
+    @Query('year') year: string,
+  ) {
+    const now = new Date();
+    return this.salonsService.getPayrollSummary(
+      req.user.userId,
+      month ? parseInt(month, 10) : now.getMonth() + 1,
+      year ? parseInt(year, 10) : now.getFullYear(),
+    );
+  }
+
+  // ── Analytics ─────────────────────────────────────────────────────────────
+
+  /** Professional: advanced analytics for the salon. */
+  @UseGuards(JwtAuthGuard)
+  @Get('my/analytics')
+  getSalonAnalytics(@Req() req: any, @Query('period') period?: string) {
+    return this.salonsService.getSalonAnalytics(req.user.userId, period ?? '30d');
+  }
+
+  /** Public: get salon portfolio photos. */
+  @Get('portfolio/active')
+  getSalonPortfolioByQuery(@Query('salonId') salonId: string) {
+    if (!salonId) return [];
+    return this.salonsService.getSalonPortfolio(salonId);
+  }
+
+  /** Professional: upload a portfolio / before-after photo. */
+  @UseGuards(JwtAuthGuard)
+  @Post('my/portfolio')
+  @HttpCode(200)
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      storage: diskStorage({
+        destination: (_req, _file, cb) => {
+          const dir = join(process.cwd(), 'uploads', 'portfolio');
+          if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+          cb(null, dir);
+        },
+        filename: (_req, file, cb) => {
+          const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+          cb(null, `${unique}${extname(file.originalname)}`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        if (!file.mimetype.match(/^image\/(jpeg|jpg|png|webp)$/)) {
+          return cb(new BadRequestException('Only JPEG, PNG, or WebP images are allowed.'), false);
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  uploadPortfolioPhoto(
+    @Req() req: any,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() body: { type?: string; caption?: string; beforeUrl?: string },
+  ) {
+    if (!file) throw new BadRequestException('No photo file received.');
+    return this.salonsService.addSalonPortfolio(req.user.userId, {
+      type: body?.type ?? 'portfolio',
+      photoUrl: `/uploads/portfolio/${file.filename}`,
+      beforeUrl: body?.beforeUrl,
+      caption: body?.caption,
+    });
+  }
+
+  /** Professional: delete a portfolio photo. */
+  @UseGuards(JwtAuthGuard)
+  @Delete('my/portfolio/:photoId')
+  @HttpCode(200)
+  deletePortfolioPhoto(@Req() req: any, @Param('photoId') photoId: string) {
+    return this.salonsService.deleteSalonPortfolio(req.user.userId, photoId);
+  }
+
   /** Public: list reviews for a salon. */
   @Get(':id/reviews')
   getSalonReviews(@Param('id') id: string) {
     return this.salonsService.getSalonReviews(id);
   }
 
-  /** Customer-facing salon detail — services with price/duration, amenities, barber count. */
+  /** Customer: most booked salons this week near a location. */
+  @Get('trending')
+  getTrendingSalons(
+    @Query('lat') lat: string,
+    @Query('lng') lng: string,
+    @Query('radius') radius?: string,
+  ) {
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    if (isNaN(latNum) || isNaN(lngNum)) return [];
+    return this.salonsService.getTrendingSalons(
+      latNum,
+      lngNum,
+      radius ? parseFloat(radius) : 10,
+    );
+  }
+
+  /** Customer: live queue info for a salon. */
+  @Get(':id/queue')
+  getSalonQueue(@Param('id') id: string) {
+    return this.salonsService.getSalonQueue(id);
+  }
+
+  /** Public: portfolio photos for a specific salon. */
+  @Get(':id/portfolio')
+  getSalonPortfolio(@Param('id') id: string) {
+    return this.salonsService.getSalonPortfolio(id);
+  }
+
+  /** Customer-facing salon detail — services with price/duration, amenities, barber count, barbers. */
   @Get(':id')
   getSalonById(@Param('id') id: string) {
     return this.salonsService.getSalonById(id);

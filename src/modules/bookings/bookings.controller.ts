@@ -43,11 +43,27 @@ export class BookingsController {
     return this.bookingsService.getMonthlyBookingCount(req.user.userId);
   }
 
+  /** Professional: count of non-cancelled bookings for their salon this month. */
+  @UseGuards(JwtAuthGuard)
+  @Get('professional/monthly-count')
+  getProfessionalMonthlyBookingCount(@Req() req: any) {
+    return this.bookingsService.getProfessionalMonthlyBookingCount(
+      req.user.userId,
+    );
+  }
+
   /** Professional: earnings summary + completed bookings. */
   @UseGuards(JwtAuthGuard)
   @Get('earnings')
   getEarnings(@Req() req: any) {
     return this.bookingsService.getEarnings(req.user.userId);
+  }
+
+  /** Customer: last completed booking for "Book Your Usual" flow. */
+  @UseGuards(JwtAuthGuard)
+  @Get('last-completed')
+  getLastCompletedBooking(@Req() req: any) {
+    return this.bookingsService.getLastCompletedBooking(req.user.userId);
   }
 
   @UseGuards(JwtAuthGuard)

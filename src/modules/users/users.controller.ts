@@ -9,7 +9,9 @@ import {
   Get,
   HttpCode,
   Param,
+  Query,
   BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { UsersService } from '../users/users.service';
@@ -31,6 +33,19 @@ export class UsersController {
   @Get('profile')
   async getProfile(@Req() req: any) {
     return this.usersService.getProfile(req.user.userId);
+  }
+
+  /** Professional: look up a customer name by phone for offline booking auto-fill. */
+  @UseGuards(JwtAuthGuard)
+  @Get('lookup-by-phone')
+  async lookupByPhone(@Query('phone') phone: string, @Req() req: any) {
+    if (!phone?.trim()) throw new BadRequestException('phone is required');
+    const result = await this.usersService.lookupCustomerByPhone(
+      phone.trim(),
+      req.user.userId,
+    );
+    if (!result) throw new NotFoundException('No customer account found with that phone number');
+    return result;
   }
 
   @UseGuards(JwtAuthGuard)
@@ -126,5 +141,30 @@ export class UsersController {
   @HttpCode(200)
   removeFromWishlist(@Param('salonId') salonId: string, @Req() req: any) {
     return this.usersService.removeFromWishlist(req.user.userId, salonId);
+  }
+
+  // ── Complaints ─────────────────────────────────────────────────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Post('complaints')
+  @HttpCode(201)
+  submitComplaint(
+    @Req() req: any,
+    @Body() body: {
+      type: 'user' | 'salon';
+      targetId: string;
+      reason: string;
+      description?: string;
+      severity?: 'minor' | 'major';
+    },
+  ) {
+    return this.usersService.submitComplaint(
+      req.user.userId,
+      body.type,
+      body.targetId,
+      body.reason,
+      body.description ?? '',
+      body.severity ?? 'minor',
+    );
   }
 }

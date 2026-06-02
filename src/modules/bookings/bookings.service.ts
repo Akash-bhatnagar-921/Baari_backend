@@ -121,21 +121,32 @@ export class BookingsService {
     const [oH, oM] = (openingTime ?? '09:00').split(':').map(Number);
     const [cH, cM] = (closingTime ?? '21:00').split(':').map(Number);
 
-    // Fetch all active bookings for this salon on this day in ONE query
+    // Fetch all active bookings and scheduled walk-ins for this day in parallel
     const dayStart = new Date(year, month - 1, day, 0, 0, 0, 0);
     const dayEnd = new Date(year, month - 1, day, 23, 59, 59, 999);
 
-    const existingBookings: Array<{
-      scheduledAt: string;
-      totalDuration: number;
-    }> = await this.dataSource.query(
-      `SELECT "scheduledAt", "totalDuration" FROM bookings
-         WHERE "salonId" = $1
-           AND status IN ${ACTIVE_STATUSES}
-           AND "scheduledAt" < $2
-           AND "scheduledAt" + ("totalDuration" * INTERVAL '1 minute') > $3`,
-      [salonId, dayEnd.toISOString(), dayStart.toISOString()],
-    );
+    const [existingBookings, scheduledWalkIns] = await Promise.all([
+      this.dataSource.query(
+        `SELECT "scheduledAt", "totalDuration" FROM bookings
+           WHERE "salonId" = $1
+             AND status IN ${ACTIVE_STATUSES}
+             AND "scheduledAt" < $2
+             AND "scheduledAt" + ("totalDuration" * INTERVAL '1 minute') > $3`,
+        [salonId, dayEnd.toISOString(), dayStart.toISOString()],
+      ) as Promise<Array<{ scheduledAt: string; totalDuration: number }>>,
+      this.dataSource.query(
+        `SELECT "scheduledAt", "totalDuration" FROM walk_ins
+           WHERE "salonId" = $1
+             AND "scheduledAt" IS NOT NULL
+             AND status NOT IN ('cancelled')
+             AND "scheduledAt" < $2
+             AND "scheduledAt" + ("totalDuration" * INTERVAL '1 minute') > $3`,
+        [salonId, dayEnd.toISOString(), dayStart.toISOString()],
+      ) as Promise<Array<{ scheduledAt: string; totalDuration: number }>>,
+    ]);
+
+    // Merge both lists — walk-ins occupy the same barber capacity
+    const allOccupied = [...existingBookings, ...scheduledWalkIns];
 
     const now = new Date();
     const slots: any[] = [];
@@ -148,8 +159,8 @@ export class BookingsService {
       // Skip slots fewer than 5 minutes in the future
       if (slotTime.getTime() - now.getTime() < 5 * 60 * 1000) continue;
 
-      // Count barbers busy at this slot (in-memory)
-      const busy = existingBookings.filter((b) => {
+      // Count barbers busy at this slot (in-memory, includes walk-ins)
+      const busy = allOccupied.filter((b) => {
         const bStart = new Date(b.scheduledAt);
         const bEnd = new Date(
           bStart.getTime() + Number(b.totalDuration) * 60_000,
@@ -535,6 +546,58 @@ export class BookingsService {
     return { count: parseInt(rows[0]?.cnt ?? '0', 10) };
   }
 
+  // ── Professional: Monthly booking count for their salon ──────────────────────
+  // Returns the number of non-cancelled, non-rejected bookings received by all
+  // salons managed by this professional in the current calendar month.
+
+  async getProfessionalMonthlyBookingCount(
+    userId: string,
+  ): Promise<{ count: number }> {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const rows = await this.dataSource.query(
+      `SELECT COUNT(*) AS cnt
+       FROM bookings b
+       JOIN salons s ON s.id = b."salonId"::uuid
+       WHERE s."managerId" = $1::uuid
+         AND b.status NOT IN ('cancelled', 'rejected')
+         AND b."createdAt" >= $2`,
+      [userId, monthStart.toISOString()],
+    );
+    return { count: parseInt(rows[0]?.cnt ?? '0', 10) };
+  }
+
+  // ── Customer: Last completed booking (for "Book Your Usual") ────────────────
+
+  async getLastCompletedBooking(userId: string) {
+    const rows = await this.dataSource.query(
+      `SELECT b.id, b."salonId", b."salonName", b.services, b."totalAmount",
+              b."totalDuration", b."scheduledAt",
+              s.name AS "liveSalonName", s.address, s.city, s.image,
+              s.rating, s."reviewCount"
+       FROM bookings b
+       LEFT JOIN salons s ON s.id = b."salonId"::uuid
+       WHERE b."userId" = $1 AND b.status = 'completed'
+       ORDER BY b."scheduledAt" DESC
+       LIMIT 1`,
+      [userId],
+    );
+    if (!rows.length) return null;
+    const r = rows[0];
+    return {
+      id: r.id,
+      salonId: r.salonId,
+      salonName: r.salonName || r.liveSalonName || 'Salon',
+      salonImage: r.image ?? null,
+      address: [r.address, r.city].filter(Boolean).join(', '),
+      scheduledAt: r.scheduledAt,
+      services: r.services ?? [],
+      totalAmount: parseFloat(r.totalAmount ?? '0'),
+      totalDuration: r.totalDuration ?? 0,
+      salonRating: parseFloat(r.rating ?? '0'),
+    };
+  }
+
   // ── Customer: Active booking check ───────────────────────────────────────────
 
   async getActiveBooking(userId: string) {
@@ -652,8 +715,71 @@ export class BookingsService {
     );
     const total = parseInt(totalRows[0]?.cnt ?? '0', 10);
 
+    // Fetch walk-ins by phone on page 1 only
+    let walkIns: any[] = [];
+    if (safePage === 1) {
+      const userRows = await this.dataSource.query(
+        `SELECT phone FROM users WHERE id = $1::uuid`,
+        [userId],
+      );
+      const userPhone = (userRows[0]?.phone as string | undefined)?.trim();
+      if (userPhone) {
+        // Auto-complete overdue scheduled walk-ins for this phone
+        await this.dataSource.query(
+          `UPDATE walk_ins
+           SET status = 'completed'
+           WHERE TRIM("customerPhone") = $1
+             AND "scheduledAt" IS NOT NULL
+             AND status NOT IN ('completed', 'cancelled')
+             AND "scheduledAt" + ("totalDuration" * INTERVAL '1 minute') + INTERVAL '5 minutes' < NOW()`,
+          [userPhone],
+        );
+
+        // Fetch all non-cancelled, non-waiting walk-ins for this phone.
+        // Include confirmed/in_progress ones whose scheduledAt is in the past —
+        // the service has been rendered even if the barber hasn't ticked it yet.
+        const wiRows = await this.dataSource.query(
+          `SELECT wi.id, wi."salonId", wi."customerName", wi.services,
+                  wi."totalAmount", wi."totalDuration", wi."scheduledAt",
+                  wi.status, wi.notes, wi."createdAt", wi."updatedAt",
+                  s.name AS "salonName", s.address, s.city
+           FROM walk_ins wi
+           LEFT JOIN salons s ON s.id = wi."salonId"::uuid
+           WHERE TRIM(wi."customerPhone") = $1
+             AND wi.status NOT IN ('cancelled', 'waiting')
+           ORDER BY wi."scheduledAt" DESC NULLS LAST, wi."createdAt" DESC`,
+          [userPhone],
+        );
+        walkIns = wiRows.map((wi: any) => {
+          const scheduledAt = wi.scheduledAt ? new Date(wi.scheduledAt) : null;
+          const isConfirmedFuture =
+            wi.status === 'confirmed' && scheduledAt && scheduledAt > now;
+          return {
+            id: wi.id,
+            salonId: wi.salonId,
+            salonName: wi.salonName ?? 'Salon',
+            address: [wi.address, wi.city].filter(Boolean).join(', '),
+            scheduledAt: wi.scheduledAt,
+            // Show future confirmed walk-ins as confirmed; past ones as completed
+            status: isConfirmedFuture ? 'confirmed' : 'completed',
+            totalAmount: parseFloat(wi.totalAmount ?? '0'),
+            totalDuration: wi.totalDuration ?? 0,
+            services: wi.services ?? [],
+            createdAt: wi.createdAt,
+            updatedAt: wi.updatedAt,
+            isUpcoming: isConfirmedFuture,
+            bookingOtp: null,
+            canModify: false,
+            hasReview: false,
+            type: 'walk_in',
+          };
+        });
+      }
+    }
+
     return {
       bookings: mapped,
+      walkIns,
       pagination: { page: safePage, limit: safeLimit, total, hasMore: offset + safeLimit < total },
     };
   }
@@ -738,22 +864,59 @@ export class BookingsService {
     await this.autoExpirePendingBookings({ salonId });
     await this.autoCompleteOldBookings({ salonId });
 
+    // Auto-complete scheduled walk-ins whose service time + 5 min has passed
+    await this.dataSource.query(
+      `UPDATE walk_ins
+       SET status = 'completed'
+       WHERE "salonId" = $1
+         AND "scheduledAt" IS NOT NULL
+         AND status NOT IN ('completed', 'cancelled')
+         AND "scheduledAt" + ("totalDuration" * INTERVAL '1 minute') + INTERVAL '5 minutes' < NOW()`,
+      [salonId],
+    );
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today.getTime() + 86_400_000);
 
-    const bookings = await this.dataSource.query(
-      `SELECT b.*, u."fullName" AS "customerName", u.phone AS "customerPhone"
-       FROM bookings b
-       LEFT JOIN users u ON u.id = b."userId"::uuid
-       WHERE b."salonId" = $1
-       ORDER BY b."scheduledAt" DESC
-       LIMIT 300`,
-      [salonId],
+    const [bookings, walkIns] = await Promise.all([
+      this.dataSource.query(
+        `SELECT b.*, u."fullName" AS "customerName", u.phone AS "customerPhone"
+         FROM bookings b
+         LEFT JOIN users u ON u.id = b."userId"::uuid
+         WHERE b."salonId" = $1
+         ORDER BY b."scheduledAt" DESC
+         LIMIT 300`,
+        [salonId],
+      ),
+      this.dataSource.query(
+        `SELECT w.id, w."customerName", w."customerPhone", w.status,
+                w."scheduledAt", w."totalDuration", w."totalAmount",
+                w.services, w.notes, w."createdAt"
+         FROM walk_ins w
+         WHERE w."salonId" = $1
+           AND w."scheduledAt" IS NOT NULL
+         ORDER BY w."scheduledAt" DESC
+         LIMIT 200`,
+        [salonId],
+      ),
+    ]);
+
+    // Normalise walk-ins to the same shape as bookings so the frontend
+    // can render them in the same list. A `type` discriminator lets the
+    // UI skip the OTP flow and call the walk-in complete endpoint instead.
+    const normalisedWalkIns = walkIns.map((w: any) => ({
+      ...w,
+      type: 'walk_in',
+    }));
+
+    const allAppointments = [...bookings, ...normalisedWalkIns].sort(
+      (a: any, b: any) =>
+        new Date(b.scheduledAt).getTime() - new Date(a.scheduledAt).getTime(),
     );
 
     // Today's stats — only appointments scheduled for today
-    const todayRows = bookings.filter((b: any) => {
+    const todayRows = allAppointments.filter((b: any) => {
       const dt = new Date(b.scheduledAt);
       return dt >= today && dt < tomorrow && !['cancelled', 'rejected', 'expired'].includes(b.status);
     });
@@ -776,7 +939,7 @@ export class BookingsService {
     ).length;
 
     return {
-      bookings,
+      bookings: allAppointments,
       stats: {
         todayBookings: activeToday,      // active appointments needing attention
         completedToday,                   // done for the day

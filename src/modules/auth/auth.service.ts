@@ -88,7 +88,17 @@ export class AuthService {
     }
 
     if (user.isActive === false) {
-      throw new BadRequestException('Your account has been deactivated. Please contact support.');
+      if (user.bannedUntil && new Date(user.bannedUntil) <= new Date()) {
+        // Timed ban has expired — restore access silently
+        await this.usersService.restoreExpiredBan(user.id);
+      } else {
+        const until = user.bannedUntil
+          ? `until ${new Date(user.bannedUntil).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`
+          : 'permanently';
+        throw new BadRequestException(
+          `Your account has been suspended ${until}. Reason: ${user.banReason ?? 'Violation of terms'}. Contact support to appeal.`,
+        );
+      }
     }
 
     // Email is optional for professionals. When absent the OTP is logged to

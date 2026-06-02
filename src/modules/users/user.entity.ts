@@ -59,4 +59,11 @@ export class User {
   // Admins can ban a user; banned users cannot log in
   @Column({ default: true })
   isActive!: boolean;
+
+  // null = permanent ban; a future timestamp = timed ban (auto-expires)
+  @Column({ type: 'timestamptz', nullable: true })
+  bannedUntil!: Date | null;
+
+  @Column({ type: 'text', nullable: true })
+  banReason!: string | null;
 }
