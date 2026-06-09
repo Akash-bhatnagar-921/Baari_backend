@@ -113,6 +113,20 @@ export class UsersController {
     return this.usersService.cancelSubscription(req.user.userId);
   }
 
+  // ── Invoices ───────────────────────────────────────────────────────────────
+
+  @UseGuards(JwtAuthGuard)
+  @Get('invoices')
+  getInvoices(@Req() req: any) {
+    return this.usersService.getInvoices(req.user.userId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('invoices/:id')
+  getInvoice(@Req() req: any, @Param('id') id: string) {
+    return this.usersService.getInvoice(req.user.userId, id);
+  }
+
   // ── Wishlist ───────────────────────────────────────────────────────────────
 
   /** Returns all wishlisted salons with full details. */

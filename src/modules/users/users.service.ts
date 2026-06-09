@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, UnauthorizedException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHmac } from 'crypto';
@@ -288,19 +288,32 @@ export class UsersService {
         status: 'active',
         expiresAt,
       });
-      await this.syncSalonFlags(userId, plan);
-      return { plan, status: 'active', expiresAt };
+    } else {
+      const sub = this.subRepo.create({
+        userId,
+        plan: plan as SubscriptionPlan,
+        status: 'active',
+        expiresAt,
+      });
+      await this.subRepo.save(sub);
     }
 
-    const sub = this.subRepo.create({
-      userId,
-      plan: plan as SubscriptionPlan,
-      status: 'active',
-      expiresAt,
-    });
-    await this.subRepo.save(sub);
     await this.syncSalonFlags(userId, plan);
-    return { plan, status: 'active', expiresAt };
+
+    // Generate invoice for paid plans (Razorpay payment present)
+    let invoiceNumber: string | undefined;
+    if (payment?.paymentId && UsersService.PLAN_PRICES[plan]) {
+      invoiceNumber = await this.createInvoice({
+        userId,
+        plan,
+        totalAmountPaise: UsersService.PLAN_PRICES[plan],
+        paymentId: payment.paymentId,
+        orderId:   payment.orderId,
+        paymentMode: 'razorpay',
+      });
+    }
+
+    return { plan, status: 'active', expiresAt, invoiceNumber };
   }
 
   // ─── Professional subscription info ──────────────────────────────────────────
@@ -438,6 +451,95 @@ export class UsersService {
       select: ['salonId'],
     });
     return { ids: entries.map((e) => e.salonId) };
+  }
+
+  // ── Invoices ──────────────────────────────────────────────────────────────
+
+  private static invoicesTableReady = false;
+
+  private async ensureInvoicesTable() {
+    if (UsersService.invoicesTableReady) return;
+    await this.dataSource.query(`CREATE SEQUENCE IF NOT EXISTS invoice_seq START 1`);
+    await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS invoices (
+        id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+        "invoiceNumber" VARCHAR(30) NOT NULL UNIQUE,
+        "userId"        TEXT        NOT NULL,
+        plan            VARCHAR(40) NOT NULL,
+        "baseAmount"    INTEGER     NOT NULL,
+        "taxAmount"     INTEGER     NOT NULL,
+        "totalAmount"   INTEGER     NOT NULL,
+        "paymentId"     TEXT,
+        "orderId"       TEXT,
+        "paymentMode"   VARCHAR(20) NOT NULL DEFAULT 'razorpay',
+        "customerName"  TEXT,
+        "customerPhone" TEXT,
+        "customerEmail" TEXT,
+        "createdAt"     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await this.dataSource.query(
+      `CREATE INDEX IF NOT EXISTS invoices_user_idx ON invoices ("userId", "createdAt" DESC)`,
+    );
+    UsersService.invoicesTableReady = true;
+  }
+
+  private async createInvoice(opts: {
+    userId: string;
+    plan: string;
+    totalAmountPaise: number;
+    paymentId?: string;
+    orderId?: string;
+    paymentMode?: string;
+  }) {
+    await this.ensureInvoicesTable();
+    const year = new Date().getFullYear();
+    const [{ seq }] = await this.dataSource.query(`SELECT nextval('invoice_seq') AS seq`);
+    const invoiceNumber = `BAARI-${year}-${String(seq).padStart(6, '0')}`;
+
+    const user = await this.userRepo.findOne({ where: { id: opts.userId } });
+
+    // GST-inclusive calculation at 18%: base = total / 1.18
+    const total = opts.totalAmountPaise;
+    const base  = Math.round(total / 1.18);
+    const tax   = total - base;
+
+    await this.dataSource.query(
+      `INSERT INTO invoices (
+        "invoiceNumber", "userId", plan,
+        "baseAmount", "taxAmount", "totalAmount",
+        "paymentId", "orderId", "paymentMode",
+        "customerName", "customerPhone", "customerEmail"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        invoiceNumber, opts.userId, opts.plan,
+        base, tax, total,
+        opts.paymentId ?? null, opts.orderId ?? null,
+        opts.paymentMode ?? 'razorpay',
+        (user as any)?.fullName ?? null,
+        user?.phone ?? null,
+        user?.email ?? null,
+      ],
+    );
+    return invoiceNumber;
+  }
+
+  async getInvoices(userId: string) {
+    await this.ensureInvoicesTable();
+    return this.dataSource.query(
+      `SELECT * FROM invoices WHERE "userId" = $1 ORDER BY "createdAt" DESC`,
+      [userId],
+    );
+  }
+
+  async getInvoice(userId: string, invoiceId: string) {
+    await this.ensureInvoicesTable();
+    const rows = await this.dataSource.query(
+      `SELECT * FROM invoices WHERE id = $1 AND "userId" = $2`,
+      [invoiceId, userId],
+    );
+    if (!rows.length) throw new NotFoundException('Invoice not found');
+    return rows[0];
   }
 
   // ── Complaints ─────────────────────────────────────────────────────────────
